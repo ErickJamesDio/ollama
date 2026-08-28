@@ -723,7 +723,7 @@ function ChatForm({
       {/* File upload error message */}
       {fileUploadError && <ErrorMessage error={fileUploadError} />}
       <div
-        className={`relative mx-auto flex bg-neutral-100 w-full max-w-[768px] flex-col items-center rounded-3xl pb-2 pt-4 dark:bg-neutral-800 dark:border-neutral-700 min-h-[88px] transition-opacity duration-200 ${isDisabled ? "opacity-50" : "opacity-100"}`}
+      className={`relative mx-auto flex bg-neutral-200 w-full max-w-[768px] flex-col items-center rounded-3xl border border-neutral-200 pb-2 pt-4 dark:bg-neutral-800 dark:border-neutral-700 min-h-[88px] transition-opacity duration-200 ${isDisabled ? "opacity-50" : "opacity-100"}`}
       >
         {isDisabled && (
           // overlay to block interaction

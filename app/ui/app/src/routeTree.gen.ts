@@ -12,6 +12,7 @@
 
 import { Route as rootRoute } from './routes/__root'
 import { Route as SettingsImport } from './routes/settings'
+import { Route as PluginsImport } from './routes/plugins'
 import { Route as OnboardingImport } from './routes/onboarding'
 import { Route as ConnectImport } from './routes/connect'
 import { Route as IndexImport } from './routes/index'
@@ -22,6 +23,12 @@ import { Route as CChatIdImport } from './routes/c.$chatId'
 const SettingsRoute = SettingsImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => rootRoute,
+} as any)
+
+const PluginsRoute = PluginsImport.update({
+  id: '/plugins',
+  path: '/plugins',
   getParentRoute: () => rootRoute,
 } as any)
 
@@ -74,6 +81,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OnboardingImport
       parentRoute: typeof rootRoute
     }
+    '/plugins': {
+      id: '/plugins'
+      path: '/plugins'
+      fullPath: '/plugins'
+      preLoaderRoute: typeof PluginsImport
+      parentRoute: typeof rootRoute
+    }
     '/settings': {
       id: '/settings'
       path: '/settings'
@@ -97,6 +111,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/connect': typeof ConnectRoute
   '/onboarding': typeof OnboardingRoute
+  '/plugins': typeof PluginsRoute
   '/settings': typeof SettingsRoute
   '/c/$chatId': typeof CChatIdRoute
 }
@@ -105,6 +120,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/connect': typeof ConnectRoute
   '/onboarding': typeof OnboardingRoute
+  '/plugins': typeof PluginsRoute
   '/settings': typeof SettingsRoute
   '/c/$chatId': typeof CChatIdRoute
 }
@@ -114,16 +130,30 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/connect': typeof ConnectRoute
   '/onboarding': typeof OnboardingRoute
+  '/plugins': typeof PluginsRoute
   '/settings': typeof SettingsRoute
   '/c/$chatId': typeof CChatIdRoute
 }
 
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/connect' | '/onboarding' | '/settings' | '/c/$chatId'
+  fullPaths:
+    | '/'
+    | '/connect'
+    | '/onboarding'
+    | '/plugins'
+    | '/settings'
+    | '/c/$chatId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/connect' | '/onboarding' | '/settings' | '/c/$chatId'
-  id: '__root__' | '/' | '/connect' | '/onboarding' | '/settings' | '/c/$chatId'
+  to: '/' | '/connect' | '/onboarding' | '/plugins' | '/settings' | '/c/$chatId'
+  id:
+    | '__root__'
+    | '/'
+    | '/connect'
+    | '/onboarding'
+    | '/plugins'
+    | '/settings'
+    | '/c/$chatId'
   fileRoutesById: FileRoutesById
 }
 
@@ -131,6 +161,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ConnectRoute: typeof ConnectRoute
   OnboardingRoute: typeof OnboardingRoute
+  PluginsRoute: typeof PluginsRoute
   SettingsRoute: typeof SettingsRoute
   CChatIdRoute: typeof CChatIdRoute
 }
@@ -139,6 +170,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ConnectRoute: ConnectRoute,
   OnboardingRoute: OnboardingRoute,
+  PluginsRoute: PluginsRoute,
   SettingsRoute: SettingsRoute,
   CChatIdRoute: CChatIdRoute,
 }
@@ -156,6 +188,7 @@ export const routeTree = rootRoute
         "/",
         "/connect",
         "/onboarding",
+        "/plugins",
         "/settings",
         "/c/$chatId"
       ]
@@ -168,6 +201,9 @@ export const routeTree = rootRoute
     },
     "/onboarding": {
       "filePath": "onboarding.tsx"
+    },
+    "/plugins": {
+      "filePath": "plugins.tsx"
     },
     "/settings": {
       "filePath": "settings.tsx"

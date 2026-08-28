@@ -256,6 +256,90 @@ func TestClaudeDesktopUsedDefaultsAndMigration(t *testing.T) {
 	}
 }
 
+func TestPluginsEnabledDefaultsAndMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "plugins.db")
+	db, err := newDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	settings, err := db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	if settings.PluginsEnabled {
+		t.Fatal("expected fresh installs to start with plugins disabled")
+	}
+
+	if _, err := db.conn.Exec(`
+		ALTER TABLE settings DROP COLUMN plugins_enabled;
+		DROP TABLE IF EXISTS plugins;
+		DROP INDEX IF EXISTS idx_plugins_provider_name;
+		UPDATE settings SET schema_version = 18;
+	`); err != nil {
+		t.Fatalf("failed to seed v18 settings row: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migration from v18 to v19 failed: %v", err)
+	}
+
+	settings, err = db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read migrated settings: %v", err)
+	}
+	if settings.PluginsEnabled {
+		t.Fatal("expected migrated installs to keep plugins disabled by default")
+	}
+
+	var tableCount int
+	if err := db.conn.QueryRow(`
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name = 'plugins'
+	`).Scan(&tableCount); err != nil {
+		t.Fatalf("failed to verify plugins table: %v", err)
+	}
+	if tableCount != 1 {
+		t.Fatal("expected plugins table to exist after migration")
+	}
+}
+
+func TestLocalModelsEnabledDefaultsAndMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "local-models.db")
+	db, err := newDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	settings, err := db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	if !settings.LocalModelsEnabled {
+		t.Fatal("expected fresh installs to start with local models enabled")
+	}
+
+	if _, err := db.conn.Exec(`
+		ALTER TABLE settings DROP COLUMN local_models_enabled;
+		UPDATE settings SET schema_version = 19;
+	`); err != nil {
+		t.Fatalf("failed to seed v19 settings row: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migration from v19 to v20 failed: %v", err)
+	}
+
+	settings, err = db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read migrated settings: %v", err)
+	}
+	if !settings.LocalModelsEnabled {
+		t.Fatal("expected migrated installs to keep local models enabled by default")
+	}
+}
+
 func TestChatDeletionWithCascade(t *testing.T) {
 	t.Run("chat deletion cascades to related messages", func(t *testing.T) {
 		tmpDir := t.TempDir()

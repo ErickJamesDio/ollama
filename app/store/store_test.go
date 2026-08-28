@@ -279,6 +279,110 @@ func TestClaudeDesktopUsedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPluginsEnabledRoundTrip(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	settings, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.PluginsEnabled {
+		t.Fatal("expected PluginsEnabled to be false by default")
+	}
+
+	settings.PluginsEnabled = true
+	if err := s.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.PluginsEnabled {
+		t.Fatal("expected PluginsEnabled to persist")
+	}
+}
+
+func TestLocalModelsEnabledRoundTrip(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	settings, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.LocalModelsEnabled {
+		t.Fatal("expected LocalModelsEnabled to be true by default")
+	}
+
+	settings.LocalModelsEnabled = false
+	if err := s.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LocalModelsEnabled {
+		t.Fatal("expected LocalModelsEnabled to persist as false")
+	}
+}
+
+func TestPluginCRUD(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	plugin := Plugin{
+		ID:       "mcp:example",
+		Name:     "example",
+		Provider: "mcp",
+		Enabled:  true,
+		Config:   []byte(`{"command":"example","args":[],"transport":"stdio"}`),
+	}
+
+	if err := s.UpsertPlugin(plugin); err != nil {
+		t.Fatalf("UpsertPlugin() error = %v", err)
+	}
+
+	plugins, err := s.Plugins()
+	if err != nil {
+		t.Fatalf("Plugins() error = %v", err)
+	}
+	if len(plugins) != 1 {
+		t.Fatalf("expected 1 plugin, got %d", len(plugins))
+	}
+	if plugins[0].ID != plugin.ID || plugins[0].Name != plugin.Name {
+		t.Fatalf("unexpected plugin: %+v", plugins[0])
+	}
+
+	if err := s.SetPluginEnabled(plugin.ID, false); err != nil {
+		t.Fatalf("SetPluginEnabled() error = %v", err)
+	}
+
+	plugins, err = s.Plugins()
+	if err != nil {
+		t.Fatalf("Plugins() after toggle error = %v", err)
+	}
+	if plugins[0].Enabled {
+		t.Fatal("expected plugin to be disabled")
+	}
+
+	if err := s.DeletePlugin(plugin.ID); err != nil {
+		t.Fatalf("DeletePlugin() error = %v", err)
+	}
+
+	plugins, err = s.Plugins()
+	if err != nil {
+		t.Fatalf("Plugins() after delete error = %v", err)
+	}
+	if len(plugins) != 0 {
+		t.Fatalf("expected 0 plugins after delete, got %d", len(plugins))
+	}
+}
+
 // setupTestStore creates a temporary store for testing
 func setupTestStore(t *testing.T) (*Store, func()) {
 	t.Helper()

@@ -13,6 +13,8 @@ interface SettingsState {
   onboardingVersion: number;
   thinkEnabled: boolean;
   thinkLevel: string;
+  localModelsEnabled: boolean;
+  pluginsEnabled: boolean;
 }
 
 // Type for partial settings updates
@@ -25,6 +27,8 @@ type SettingsUpdate = Partial<{
   SidebarOpen: boolean;
   LastHomeView: string;
   OnboardingVersion: number;
+  LocalModelsEnabled: boolean;
+  PluginsEnabled: boolean;
 }>;
 
 export function useSettings() {
@@ -39,7 +43,21 @@ export function useSettings() {
   // Update settings with useMutation
   const updateSettingsMutation = useMutation({
     mutationFn: updateSettings,
-    onSuccess: () => {
+    onMutate: async (nextSettings) => {
+      await queryClient.cancelQueries({ queryKey: ["settings"] });
+      const previousSettings = queryClient.getQueryData(["settings"]);
+      queryClient.setQueryData(["settings"], {
+        settings: nextSettings,
+      });
+      return { previousSettings };
+    },
+    onError: (_error, _nextSettings, context) => {
+      if (context?.previousSettings !== undefined) {
+        queryClient.setQueryData(["settings"], context.previousSettings);
+      }
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["settings"], data);
       // Invalidate the query to ensure fresh data
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
@@ -56,6 +74,8 @@ export function useSettings() {
       sidebarOpen: settingsData?.settings?.SidebarOpen ?? false,
       lastHomeView: settingsData?.settings?.LastHomeView ?? "chat",
       onboardingVersion: settingsData?.settings?.OnboardingVersion ?? 0,
+      localModelsEnabled: settingsData?.settings?.LocalModelsEnabled ?? true,
+      pluginsEnabled: settingsData?.settings?.PluginsEnabled ?? false,
     }),
     [settingsData?.settings],
   );
@@ -63,16 +83,19 @@ export function useSettings() {
   // Single function to update most settings
   const setSettings = useCallback(
     async (updates: SettingsUpdate) => {
-      if (!settingsData?.settings) return;
+      const currentSettings =
+        queryClient.getQueryData<{ settings: Settings }>(["settings"])
+          ?.settings ?? settingsData?.settings;
+      if (!currentSettings) return;
 
       const updatedSettings = new Settings({
-        ...settingsData.settings,
+        ...currentSettings,
         ...updates,
       });
 
       await updateSettingsMutation.mutateAsync(updatedSettings);
     },
-    [settingsData?.settings, updateSettingsMutation],
+    [queryClient, settingsData?.settings, updateSettingsMutation],
   );
 
   return useMemo(

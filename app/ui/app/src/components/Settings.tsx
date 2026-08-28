@@ -17,6 +17,7 @@ import {
   ArrowDownTrayIcon,
   Squares2X2Icon,
 } from "@heroicons/react/20/solid";
+import { CpuChipIcon, PuzzlePieceIcon } from "@heroicons/react/24/outline";
 import { Settings as SettingsType } from "@/gotypes";
 import { isWindowsPlatform } from "@/lib/platform";
 import { useUser } from "@/hooks/useUser";
@@ -47,6 +48,7 @@ function AnimatedDots() {
 export default function Settings() {
   const queryClient = useQueryClient();
   const [showSaved, setShowSaved] = useState(false);
+  const [modelsPath, setModelsPath] = useState("");
   const [restartMessage, setRestartMessage] = useState(false);
   const [showAppsInMenu, setShowAppsInMenuState] = useState(true);
   const [showAppsInMenuPending, setShowAppsInMenuPending] = useState(false);
@@ -80,6 +82,12 @@ export default function Settings() {
 
   const settings = settingsData?.settings || null;
 
+  useEffect(() => {
+    if (settings?.Models !== undefined) {
+      setModelsPath(settings.Models || "");
+    }
+  }, [settings?.Models]);
+
   const { data: inferenceComputeResponse } = useQuery({
     queryKey: ["inferenceCompute"],
     queryFn: getInferenceCompute,
@@ -89,7 +97,21 @@ export default function Settings() {
 
   const updateSettingsMutation = useMutation({
     mutationFn: updateSettings,
-    onSuccess: () => {
+    onMutate: async (nextSettings) => {
+      await queryClient.cancelQueries({ queryKey: ["settings"] });
+      const previousSettings = queryClient.getQueryData(["settings"]);
+      queryClient.setQueryData(["settings"], {
+        settings: nextSettings,
+      });
+      return { previousSettings };
+    },
+    onError: (_error, _nextSettings, context) => {
+      if (context?.previousSettings !== undefined) {
+        queryClient.setQueryData(["settings"], context.previousSettings);
+      }
+    },
+    onSuccess: (data) => {
+      queryClient.setQueryData(["settings"], data);
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       setShowSaved(true);
       setTimeout(() => setShowSaved(false), 1500);
@@ -196,14 +218,20 @@ export default function Settings() {
 
   const handleChange = useCallback(
     (field: keyof SettingsType, value: boolean | string | number) => {
-      if (settings) {
+      const currentSettings =
+        queryClient.getQueryData<{ settings: SettingsType }>(["settings"])
+          ?.settings ?? settings;
+      if (currentSettings) {
         const updatedSettings = new SettingsType({
-          ...settings,
+          ...currentSettings,
           [field]: value,
         });
 
         // If context length is being changed, show restart message
-        if (field === "ContextLength" && value !== settings.ContextLength) {
+        if (
+          field === "ContextLength" &&
+          value !== currentSettings.ContextLength
+        ) {
           setRestartMessage(true);
           // Hide restart message after 3 seconds
           setTimeout(() => setRestartMessage(false), 3000);
@@ -212,7 +240,7 @@ export default function Settings() {
         updateSettingsMutation.mutate(updatedSettings);
       }
     },
-    [settings, updateSettingsMutation],
+    [queryClient, settings, updateSettingsMutation],
   );
 
   const handleResetToDefaults = () => {
@@ -223,6 +251,8 @@ export default function Settings() {
         Models: "",
         Agent: false,
         Tools: false,
+        LocalModelsEnabled: true,
+        PluginsEnabled: false,
         ContextLength: 0,
         AutoUpdateEnabled: true,
       });
@@ -302,7 +332,7 @@ export default function Settings() {
 
   return (
     <main className="flex min-h-0 w-full flex-1 flex-col select-none dark:bg-neutral-900">
-      <div className="w-full p-6 overflow-y-auto flex-1 overscroll-contain">
+      <div className="w-full px-6 pb-6 pt-4 overflow-y-auto flex-1 overscroll-contain">
         <div className="mx-auto max-w-4xl space-y-4">
           {/* Connect Ollama Account */}
           <div className="overflow-hidden rounded-xl bg-white dark:bg-neutral-800">
@@ -350,7 +380,7 @@ export default function Settings() {
                         )}
                         <Button
                           type="button"
-                          color="white"
+                          outline
                           className="px-3 py-2 text-sm"
                           onClick={() =>
                             window.open("https://ollama.com/settings", "_blank")
@@ -388,7 +418,7 @@ export default function Settings() {
                     </div>
                     <Button
                       type="button"
-                      color="white"
+                      outline
                       onClick={handleConnectOllamaAccount}
                       disabled={isRefreshing || isAwaitingConnection}
                     >
@@ -440,7 +470,28 @@ export default function Settings() {
                   </div>
                 </div>
               </Field>
-
+              {/* Local Models */}
+              <Field>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start space-x-3 flex-1">
+                    <CpuChipIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
+                    <div>
+                      <Label>Local Models</Label>
+                      <Description>
+                        Show imported local GGUF models in the model selector.
+                      </Description>
+                    </div>
+                  </div>
+                  <div className="flex-shrink-0">
+                    <Switch
+                      checked={settings.LocalModelsEnabled}
+                      onChange={(checked) =>
+                        handleChange("LocalModelsEnabled", checked)
+                      }
+                    />
+                  </div>
+                </div>
+              </Field>
               {!isWindows && (
                 <Field>
                   <div className="flex items-start justify-between gap-4">
@@ -519,13 +570,22 @@ export default function Settings() {
                     <Description>Location where models are stored.</Description>
                     <div className="mt-2 flex items-center space-x-2">
                       <Input
-                        value={settings.Models || ""}
-                        onChange={(e) => handleChange("Models", e.target.value)}
-                        readOnly
+                        value={modelsPath}
+                        onChange={(e) => setModelsPath(e.target.value)}
+                        onBlur={() => {
+                          if (modelsPath !== (settings.Models || "")) {
+                            handleChange("Models", modelsPath);
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.currentTarget.blur();
+                          }
+                        }}
                       />
                       <Button
                         type="button"
-                        color="white"
+                        outline
                         className="px-2"
                         onClick={async () => {
                           if (window.webview?.selectModelsDirectory) {
@@ -533,6 +593,7 @@ export default function Settings() {
                               const directory =
                                 await window.webview.selectModelsDirectory();
                               if (directory) {
+                                setModelsPath(directory);
                                 handleChange("Models", directory);
                               }
                             } catch (error) {
@@ -582,6 +643,33 @@ export default function Settings() {
                         ]}
                       />
                     </div>
+                  </div>
+                </div>
+              </Field>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-xl bg-white dark:bg-neutral-800">
+            <div className="p-4">
+              <Field>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start space-x-3 flex-1">
+                    <PuzzlePieceIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
+                    <div>
+                      <Label>Plugins</Label>
+                      <Description>
+                        Enable the Plugins section and saved plugin
+                        configurations.
+                      </Description>
+                    </div>
+                  </div>
+                  <div className="flex-shrink-0">
+                    <Switch
+                      checked={settings.PluginsEnabled}
+                      onChange={(checked) =>
+                        handleChange("PluginsEnabled", checked)
+                      }
+                    />
                   </div>
                 </div>
               </Field>
@@ -638,7 +726,7 @@ export default function Settings() {
           <div className="mt-6 flex justify-end px-4">
             <Button
               type="button"
-              color="white"
+              outline
               className="px-3"
               onClick={handleResetToDefaults}
             >

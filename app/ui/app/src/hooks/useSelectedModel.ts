@@ -96,12 +96,7 @@ export function useSelectedModel(currentChatId?: string, searchQuery?: string) {
         })) ||
       null
     );
-  }, [
-    models,
-    settings.selectedModel,
-    cloudDisabled,
-    recommendedModel,
-  ]);
+  }, [models, settings.selectedModel, cloudDisabled, recommendedModel]);
 
   useEffect(() => {
     if (!selectedModel) return;
@@ -121,11 +116,7 @@ export function useSelectedModel(currentChatId?: string, searchQuery?: string) {
     ) {
       setSettings({ SelectedModel: selectedModel.model, TurboEnabled: false });
     }
-  }, [
-    selectedModel,
-    cloudDisabled,
-    settings.selectedModel,
-  ]);
+  }, [selectedModel, cloudDisabled, settings.selectedModel]);
 
   // Set model from chat history when chat data loads
   useEffect(() => {
@@ -201,8 +192,16 @@ export function useSelectedModel(currentChatId?: string, searchQuery?: string) {
       return models;
     }
 
+    if (selectedModel.isCloud()) {
+      if (cloudDisabled) {
+        return models;
+      }
+    } else if (!settings.localModelsEnabled) {
+      return models;
+    }
+
     return [...models, selectedModel];
-  }, [models, selectedModel]);
+  }, [models, selectedModel, cloudDisabled, settings.localModelsEnabled]);
 
   return {
     selectedModel,

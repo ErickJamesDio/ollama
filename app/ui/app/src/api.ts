@@ -43,6 +43,20 @@ export interface IntegrationStatus {
 
 export type IntegrationStatuses = IntegrationStatus[];
 
+export interface Plugin {
+  id: string;
+  name: string;
+  provider: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PluginsResponse {
+  plugins: Plugin[];
+}
+
 export async function getIntegrationStatuses(): Promise<IntegrationStatuses> {
   const response = await fetch(`${API_BASE}/api/v1/integrations`);
   if (!response.ok) {
@@ -355,6 +369,58 @@ export async function updateSettings(settings: Settings): Promise<{
   return {
     settings: new Settings(data.settings),
   };
+}
+
+export async function getPlugins(): Promise<PluginsResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/plugins`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to fetch plugins");
+  }
+  return response.json();
+}
+
+export async function importPlugins(config: string): Promise<PluginsResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/plugins/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ config }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to import plugins");
+  }
+  return response.json();
+}
+
+export async function updatePluginEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<PluginsResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/plugins/${id}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to update plugin");
+  }
+  return response.json();
+}
+
+export async function deletePlugin(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/v1/plugins/${id}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to delete plugin");
+  }
 }
 
 export async function updateCloudSetting(

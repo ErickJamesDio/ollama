@@ -944,6 +944,314 @@ func TestSettingsPreservesClaudeDesktopUsedWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestSettingsPreservesPluginsEnabledWhenOmitted(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.PluginsEnabled = true
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "PluginsEnabled")
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: testStore, Restart: func() {}}
+	req := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	if err := server.settings(rr, req); err != nil {
+		t.Fatalf("settings() error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.PluginsEnabled {
+		t.Fatal("expected PluginsEnabled to be preserved")
+	}
+}
+
+func TestSettingsUpdatesPluginsEnabledWhenProvided(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.PluginsEnabled {
+		t.Fatal("expected PluginsEnabled to start false")
+	}
+
+	settings.PluginsEnabled = true
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{
+		Store:   testStore,
+		Restart: func() {},
+	}
+
+	postReq := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(body))
+	postRR := httptest.NewRecorder()
+	if err := server.settings(postRR, postReq); err != nil {
+		t.Fatalf("settings() POST error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.PluginsEnabled {
+		t.Fatal("expected PluginsEnabled to persist as true")
+	}
+
+	getReq := httptest.NewRequest("GET", "/api/v1/settings", nil)
+	getRR := httptest.NewRecorder()
+	if err := server.getSettings(getRR, getReq); err != nil {
+		t.Fatalf("getSettings() error = %v", err)
+	}
+
+	var response struct {
+		Settings store.Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(getRR.Body).Decode(&response); err != nil {
+		t.Fatalf("decode getSettings response: %v", err)
+	}
+	if !response.Settings.PluginsEnabled {
+		t.Fatal("expected GET /api/v1/settings to return PluginsEnabled=true")
+	}
+}
+
+func TestSettingsPreservesLocalModelsEnabledWhenOmitted(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.LocalModelsEnabled = false
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "LocalModelsEnabled")
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: testStore, Restart: func() {}}
+	req := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	if err := server.settings(rr, req); err != nil {
+		t.Fatalf("settings() error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.LocalModelsEnabled {
+		t.Fatal("expected LocalModelsEnabled to be preserved")
+	}
+}
+
+func TestSettingsUpdatesLocalModelsEnabledWhenProvided(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.LocalModelsEnabled {
+		t.Fatal("expected LocalModelsEnabled to start true")
+	}
+
+	settings.LocalModelsEnabled = false
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{
+		Store:   testStore,
+		Restart: func() {},
+	}
+
+	postReq := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(body))
+	postRR := httptest.NewRecorder()
+	if err := server.settings(postRR, postReq); err != nil {
+		t.Fatalf("settings() POST error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.LocalModelsEnabled {
+		t.Fatal("expected LocalModelsEnabled to persist as false")
+	}
+
+	getReq := httptest.NewRequest("GET", "/api/v1/settings", nil)
+	getRR := httptest.NewRecorder()
+	if err := server.getSettings(getRR, getReq); err != nil {
+		t.Fatalf("getSettings() error = %v", err)
+	}
+
+	var response struct {
+		Settings store.Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(getRR.Body).Decode(&response); err != nil {
+		t.Fatalf("decode getSettings response: %v", err)
+	}
+	if response.Settings.LocalModelsEnabled {
+		t.Fatal("expected GET /api/v1/settings to return LocalModelsEnabled=false")
+	}
+}
+
+func TestPluginHandlers(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.PluginsEnabled = true
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{
+		Store:   testStore,
+		Restart: func() {},
+	}
+
+	importBody := `{
+		"config": "{\n  \"mcpServers\": {\n    \"example\": {\n      \"command\": \"example-command\",\n      \"args\": [\"--stdio\"]\n    }\n  }\n}"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/import", strings.NewReader(importBody))
+	rr := httptest.NewRecorder()
+	if err := server.importPlugins(rr, req); err != nil {
+		t.Fatalf("importPlugins() error = %v", err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("importPlugins() status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
+	listRR := httptest.NewRecorder()
+	if err := server.listPlugins(listRR, listReq); err != nil {
+		t.Fatalf("listPlugins() error = %v", err)
+	}
+
+	var listed struct {
+		Plugins []store.Plugin `json:"plugins"`
+	}
+	if err := json.NewDecoder(listRR.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode listPlugins response: %v", err)
+	}
+	if len(listed.Plugins) != 1 {
+		t.Fatalf("expected 1 plugin, got %d", len(listed.Plugins))
+	}
+	if listed.Plugins[0].ID != "mcp:example" {
+		t.Fatalf("unexpected plugin id %q", listed.Plugins[0].ID)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/plugins/mcp:example", strings.NewReader(`{"enabled":false}`))
+	updateReq.SetPathValue("id", "mcp:example")
+	updateRR := httptest.NewRecorder()
+	if err := server.updatePlugin(updateRR, updateReq); err != nil {
+		t.Fatalf("updatePlugin() error = %v", err)
+	}
+
+	plugins, err := testStore.Plugins()
+	if err != nil {
+		t.Fatalf("Plugins() error = %v", err)
+	}
+	if len(plugins) != 1 || plugins[0].Enabled {
+		t.Fatal("expected plugin to be disabled after update")
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/plugins/mcp:example", nil)
+	deleteReq.SetPathValue("id", "mcp:example")
+	deleteRR := httptest.NewRecorder()
+	if err := server.deletePlugin(deleteRR, deleteReq); err != nil {
+		t.Fatalf("deletePlugin() error = %v", err)
+	}
+	if deleteRR.Code != http.StatusNoContent {
+		t.Fatalf("deletePlugin() status = %d, want %d", deleteRR.Code, http.StatusNoContent)
+	}
+
+	plugins, err = testStore.Plugins()
+	if err != nil {
+		t.Fatalf("Plugins() after delete error = %v", err)
+	}
+	if len(plugins) != 0 {
+		t.Fatalf("expected no plugins after delete, got %d", len(plugins))
+	}
+}
+
+func TestPluginHandlersRejectWhenDisabled(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	server := &Server{
+		Store:   testStore,
+		Restart: func() {},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
+	rr := httptest.NewRecorder()
+	if err := server.listPlugins(rr, req); err != nil {
+		t.Fatalf("listPlugins() error = %v", err)
+	}
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("listPlugins() status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+}
+
 func TestSettingsToggleAutoUpdateOn_WithPendingUpdate_ShowsNotification(t *testing.T) {
 	testStore := &store.Store{
 		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),

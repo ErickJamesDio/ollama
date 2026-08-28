@@ -418,6 +418,8 @@ export class Settings {
     OnboardingVersion: number;
     AutoUpdateEnabled: boolean;
     ClaudeDesktopUsed: boolean;
+    LocalModelsEnabled: boolean;
+    PluginsEnabled: boolean;
 
     constructor(source: any = {}) {
         if ('string' === typeof source) source = JSON.parse(source);
@@ -439,6 +441,8 @@ export class Settings {
         this.OnboardingVersion = source["OnboardingVersion"];
         this.AutoUpdateEnabled = source["AutoUpdateEnabled"];
         this.ClaudeDesktopUsed = source["ClaudeDesktopUsed"];
+        this.LocalModelsEnabled = source["LocalModelsEnabled"];
+        this.PluginsEnabled = source["PluginsEnabled"];
     }
 }
 export class SettingsResponse {

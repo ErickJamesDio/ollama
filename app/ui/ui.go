@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -297,6 +298,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/cloud", handle(s.cloudSetting))
 	mux.Handle("GET /api/v1/models/cloud", handle(s.getCloudModels))
 	mux.Handle("GET /api/v1/integrations", handle(s.getIntegrationStatuses))
+	mux.Handle("GET /api/v1/plugins", handle(s.listPlugins))
+	mux.Handle("POST /api/v1/plugins/import", handle(s.importPlugins))
+	mux.Handle("PUT /api/v1/plugins/{id}", handle(s.updatePlugin))
+	mux.Handle("DELETE /api/v1/plugins/{id}", handle(s.deletePlugin))
 
 	// Ollama proxy endpoints
 	ollamaProxy := s.ollamaProxy()
@@ -1537,25 +1542,32 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	var request struct {
-		store.Settings
-		OnboardingVersion *int
-		ClaudeDesktopUsed *bool
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read request body: %w", err)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+
+	var settings store.Settings
+	if err := json.Unmarshal(body, &settings); err != nil {
 		return fmt.Errorf("invalid request body: %w", err)
 	}
 
-	settings := request.Settings
-	if request.OnboardingVersion == nil {
-		settings.OnboardingVersion = old.OnboardingVersion
-	} else {
-		settings.OnboardingVersion = *request.OnboardingVersion
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rawFields); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
 	}
-	if request.ClaudeDesktopUsed == nil {
+
+	if _, ok := rawFields["OnboardingVersion"]; !ok {
+		settings.OnboardingVersion = old.OnboardingVersion
+	}
+	if _, ok := rawFields["ClaudeDesktopUsed"]; !ok {
 		settings.ClaudeDesktopUsed = old.ClaudeDesktopUsed
-	} else {
-		settings.ClaudeDesktopUsed = *request.ClaudeDesktopUsed
+	}
+	if _, ok := rawFields["PluginsEnabled"]; !ok {
+		settings.PluginsEnabled = old.PluginsEnabled
+	}
+	if _, ok := rawFields["LocalModelsEnabled"]; !ok {
+		settings.LocalModelsEnabled = old.LocalModelsEnabled
 	}
 
 	if err := s.Store.SetSettings(settings); err != nil {

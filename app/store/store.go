@@ -103,6 +103,16 @@ type Model struct {
 	ModifiedAt *time.Time `json:"modified_at,omitempty"` // When the model was last modified locally
 }
 
+type Plugin struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Provider  string          `json:"provider"`
+	Enabled   bool            `json:"enabled"`
+	Config    json.RawMessage `json:"config"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
 type Chat struct {
 	ID           string          `json:"id"`
 	Messages     []Message       `json:"messages"`
@@ -178,6 +188,12 @@ type Settings struct {
 
 	// ClaudeDesktopUsed records whether Claude Desktop has ever been connected through Ollama.
 	ClaudeDesktopUsed bool
+
+	// LocalModelsEnabled controls whether local non-cloud models appear in the model selector.
+	LocalModelsEnabled bool
+
+	// PluginsEnabled controls whether plugin configuration and UI are active.
+	PluginsEnabled bool
 }
 
 // Keep in sync with CURRENT_ONBOARDING_VERSION in app/ui/app/src/lib/onboarding.ts.
@@ -424,6 +440,38 @@ func (s *Store) SetSettings(settings Settings) error {
 	}
 
 	return s.db.setSettings(settings)
+}
+
+func (s *Store) Plugins() ([]Plugin, error) {
+	if err := s.ensureDB(); err != nil {
+		return nil, err
+	}
+
+	return s.db.getPlugins()
+}
+
+func (s *Store) UpsertPlugin(plugin Plugin) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.upsertPlugin(plugin)
+}
+
+func (s *Store) SetPluginEnabled(id string, enabled bool) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.setPluginEnabled(id, enabled)
+}
+
+func (s *Store) DeletePlugin(id string) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.deletePlugin(id)
 }
 
 func (s *Store) Chats() ([]Chat, error) {

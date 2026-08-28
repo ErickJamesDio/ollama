@@ -776,19 +776,19 @@ export function ConnectAppsScreen({
         <div className="flex min-w-0 items-center gap-3">
           <LaunchCommandIcon item={item} />
           <div className="min-w-0">
-            <p className="text-sm font-medium text-neutral-950">{item.name}</p>
-            <p className="truncate text-xs leading-5 text-neutral-500">
+           <p className="text-sm font-medium text-neutral-950 dark:text-white">{item.name}</p>
+            <p className="truncate text-xs leading-5 text-neutral-500 dark:text-neutral-400">
               {item.description}
             </p>
           </div>
         </div>
-        <div className="ml-auto flex min-w-0 shrink-0 items-center overflow-hidden rounded-lg bg-neutral-100 pl-3">
-          <code className="block flex-1 whitespace-nowrap py-2 pr-2 font-mono text-[13px] text-neutral-500">
+        <div className="ml-auto flex min-w-0 shrink-0 items-center overflow-hidden rounded-lg bg-neutral-100 pl-3 dark:bg-neutral-800">
+          <code className="block flex-1 whitespace-nowrap py-2 pr-2 font-mono text-[13px] text-neutral-500 dark:text-neutral-300">
             {item.command}
           </code>
           <button
             type="button"
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-neutral-500 transition-colors hover:text-neutral-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-neutral-500 transition-colors hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
             onClick={() => copyLaunchCommand(item)}
             aria-label={
               copied
@@ -876,7 +876,7 @@ export function ConnectAppsScreen({
   ) : null;
 
   return (
-    <main className="flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-white text-neutral-950">
+    <main className="flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-white text-neutral-950 dark:bg-neutral-900 dark:text-white">
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain p-6">
         <section className="min-h-0 flex-1">
           <div className="mx-auto w-full max-w-4xl text-left">
@@ -890,7 +890,7 @@ export function ConnectAppsScreen({
                     >
                       Application
                     </h2>
-                    <div className="mt-2 bg-white">{claudeRow}</div>
+                    <div className="mt-2 bg-white dark:bg-neutral-900">{claudeRow}</div>
                   </section>
                 )}
 
@@ -902,7 +902,7 @@ export function ConnectAppsScreen({
                     >
                       Terminal
                     </h2>
-                    <div className="mt-2 overflow-hidden bg-white">
+                    <div className="mt-2 overflow-hidden bg-white dark:bg-neutral-900">
                       <div className="space-y-2">
                         {initialLaunchIntegrations.map(launchIntegrationRow)}
                       </div>

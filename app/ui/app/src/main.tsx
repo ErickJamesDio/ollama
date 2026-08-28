@@ -6,6 +6,27 @@ import { routeTree } from "./routeTree.gen";
 import { fetchUser } from "./api";
 import { StreamingProvider } from "./contexts/StreamingContext";
 
+type Appearance = "system" | "light" | "dark";
+
+const APPEARANCE_KEY = "ollama-appearance";
+
+function applyAppearance(appearance: Appearance) {
+  const prefersDark = window.matchMedia(
+    "(prefers-color-scheme: dark)",
+  ).matches;
+
+  const useDark =
+    appearance === "dark" || (appearance === "system" && prefersDark);
+
+  document.documentElement.classList.toggle("dark", useDark);
+}
+
+const savedAppearance =
+  (window.localStorage.getItem(APPEARANCE_KEY) as Appearance | null) ??
+  "system";
+
+applyAppearance(savedAppearance);
+
 const queryClient = new QueryClient({
   defaultOptions: {
     mutations: {

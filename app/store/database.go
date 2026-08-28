@@ -14,7 +14,7 @@ import (
 
 // currentSchemaVersion defines the current database schema version.
 // Increment this when making schema changes that require migrations.
-const currentSchemaVersion = 18
+const currentSchemaVersion = 20
 
 // database wraps the SQLite connection.
 // SQLite handles its own locking for concurrent access:
@@ -90,6 +90,8 @@ func (db *database) init() error {
 		remote TEXT NOT NULL DEFAULT '', -- deprecated
 		auto_update_enabled BOOLEAN NOT NULL DEFAULT 1,
 		claude_desktop_used BOOLEAN NOT NULL DEFAULT 0,
+		local_models_enabled BOOLEAN NOT NULL DEFAULT 1,
+		plugins_enabled BOOLEAN NOT NULL DEFAULT 0,
 		schema_version INTEGER NOT NULL DEFAULT %d
 	);
 
@@ -151,6 +153,19 @@ func (db *database) init() error {
 		plan TEXT NOT NULL DEFAULT '',
 		cached_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
+
+	CREATE TABLE IF NOT EXISTS plugins (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT 1,
+		config_json TEXT NOT NULL DEFAULT '{}',
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(provider, name)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_plugins_provider_name ON plugins(provider, name);
 	`, currentSchemaVersion)
 
 	_, err := db.conn.Exec(schema)
@@ -285,6 +300,18 @@ func (db *database) migrate() error {
 				return fmt.Errorf("migrate v17 to v18: %w", err)
 			}
 			version = 18
+		case 18:
+			// Add plugin settings and dedicated plugin storage.
+			if err := db.migrateV18ToV19(); err != nil {
+				return fmt.Errorf("migrate v18 to v19: %w", err)
+			}
+			version = 19
+		case 19:
+			// Preserve existing behavior by defaulting local models to visible.
+			if err := db.migrateV19ToV20(); err != nil {
+				return fmt.Errorf("migrate v19 to v20: %w", err)
+			}
+			version = 20
 		default:
 			// If we have a version we don't recognize, just set it to current
 			// This might happen during development
@@ -579,6 +606,55 @@ func (db *database) migrateV17ToV18() error {
 	}
 
 	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 18`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (db *database) migrateV18ToV19() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN plugins_enabled BOOLEAN NOT NULL DEFAULT 0`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add plugins_enabled column: %w", err)
+	}
+
+	_, err = db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS plugins (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			enabled BOOLEAN NOT NULL DEFAULT 1,
+			config_json TEXT NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(provider, name)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create plugins table: %w", err)
+	}
+
+	_, err = db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_plugins_provider_name ON plugins(provider, name)`)
+	if err != nil {
+		return fmt.Errorf("create plugins index: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 19`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (db *database) migrateV19ToV20() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN local_models_enabled BOOLEAN NOT NULL DEFAULT 1`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add local_models_enabled column: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET local_models_enabled = 1, schema_version = 20`)
 	if err != nil {
 		return fmt.Errorf("update schema version: %w", err)
 	}
@@ -1234,9 +1310,9 @@ func (db *database) getSettings() (Settings, error) {
 	var s Settings
 
 	err := db.conn.QueryRow(`
-		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, last_home_view, onboarding_version, think_enabled, think_level, auto_update_enabled, claude_desktop_used
+		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, last_home_view, onboarding_version, think_enabled, think_level, auto_update_enabled, claude_desktop_used, local_models_enabled, plugins_enabled
 		FROM settings
-	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.LastHomeView, &s.OnboardingVersion, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled, &s.ClaudeDesktopUsed)
+	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.LastHomeView, &s.OnboardingVersion, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled, &s.ClaudeDesktopUsed, &s.LocalModelsEnabled, &s.PluginsEnabled)
 	if err != nil {
 		return Settings{}, fmt.Errorf("get settings: %w", err)
 	}
@@ -1252,11 +1328,103 @@ func (db *database) setSettings(s Settings) error {
 
 	_, err := db.conn.Exec(`
 		UPDATE settings
-		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, last_home_view = ?, onboarding_version = ?, think_enabled = ?, think_level = ?, auto_update_enabled = ?, claude_desktop_used = ?
-	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, lastHomeView, s.OnboardingVersion, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled, s.ClaudeDesktopUsed)
+		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, last_home_view = ?, onboarding_version = ?, think_enabled = ?, think_level = ?, auto_update_enabled = ?, claude_desktop_used = ?, local_models_enabled = ?, plugins_enabled = ?
+	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, lastHomeView, s.OnboardingVersion, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled, s.ClaudeDesktopUsed, s.LocalModelsEnabled, s.PluginsEnabled)
 	if err != nil {
 		return fmt.Errorf("set settings: %w", err)
 	}
+	return nil
+}
+
+func (db *database) getPlugins() ([]Plugin, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, name, provider, enabled, config_json, created_at, updated_at
+		FROM plugins
+		ORDER BY provider ASC, name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query plugins: %w", err)
+	}
+	defer rows.Close()
+
+	var plugins []Plugin
+	for rows.Next() {
+		var plugin Plugin
+		var configText string
+		if err := rows.Scan(
+			&plugin.ID,
+			&plugin.Name,
+			&plugin.Provider,
+			&plugin.Enabled,
+			&configText,
+			&plugin.CreatedAt,
+			&plugin.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan plugin: %w", err)
+		}
+		plugin.Config = json.RawMessage(configText)
+		plugins = append(plugins, plugin)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate plugins: %w", err)
+	}
+
+	return plugins, nil
+}
+
+func (db *database) upsertPlugin(plugin Plugin) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO plugins (id, name, provider, enabled, config_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			provider = excluded.provider,
+			enabled = excluded.enabled,
+			config_json = excluded.config_json,
+			updated_at = CURRENT_TIMESTAMP
+	`, plugin.ID, plugin.Name, plugin.Provider, plugin.Enabled, string(plugin.Config))
+	if err != nil {
+		return fmt.Errorf("upsert plugin: %w", err)
+	}
+	return nil
+}
+
+func (db *database) setPluginEnabled(id string, enabled bool) error {
+	result, err := db.conn.Exec(`
+		UPDATE plugins
+		SET enabled = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, enabled, id)
+	if err != nil {
+		return fmt.Errorf("set plugin enabled: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("plugin rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("plugin not found")
+	}
+
+	return nil
+}
+
+func (db *database) deletePlugin(id string) error {
+	result, err := db.conn.Exec(`DELETE FROM plugins WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete plugin: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("plugin rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("plugin not found")
+	}
+
 	return nil
 }
 
