@@ -1,5 +1,5 @@
 param(
-    [string]$CudaArchitectures = "61;75;89",
+    [string]$CudaArchitectures = "89",
     [int]$Jobs = 8,
     [switch]$SkipTests
 )
@@ -36,7 +36,7 @@ try {
     $env:OLLAMA_CUDA_ARCHITECTURES = $CudaArchitectures
 
     Write-Host "Building Windows CPU, CUDA 12, CLI and Desktop app"
-    Write-Host "CUDA architectures: $CudaArchitectures (61=Pascal, 75=Turing, 89=Ada Lovelace)"
+    Write-Host "CUDA architectures: $CudaArchitectures (89=Ada Lovelace)"
     & $fullBuild cpu cuda12 ollama app
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
