@@ -4,6 +4,16 @@ setlocal
 set "ROOT=%~dp0"
 set "RUNTIME=%ROOT%dist\windows-amd64\ollama.exe"
 set "LLAMA_SERVER=%ROOT%dist\windows-amd64\lib\ollama\llama-server.exe"
+set "CGO_ENABLED=1"
+
+if exist "C:\msys64\ucrt64\bin\gcc.exe" (
+    set "PATH=C:\msys64\ucrt64\bin;%PATH%"
+) else (
+    echo ERROR: C:\msys64\ucrt64\bin\gcc.exe was not found.
+    echo Install the MSYS2 UCRT64 toolchain before starting Desktop DEV.
+    pause
+    exit /b 1
+)
 
 if not exist "%RUNTIME%" goto build_runtime
 if not exist "%LLAMA_SERVER%" goto build_runtime
