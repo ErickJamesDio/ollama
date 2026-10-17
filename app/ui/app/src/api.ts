@@ -51,11 +51,38 @@ export interface Plugin {
   config: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  runtime?: {
+    status: "connected" | "error" | "disabled" | "starting";
+    tools: Array<{
+      name: string;
+      description?: string;
+      enabled: boolean;
+    }>;
+    toolCount: number;
+    lastError?: string;
+  };
 }
 
 export interface PluginsResponse {
   plugins: Plugin[];
 }
+
+export interface ManagedModel {
+  name: string;
+  size?: number;
+  digest?: string;
+  modified_at?: string | Date;
+  details?: ModelResponse["details"];
+  origin: "linked_gguf" | "ollama_storage";
+  sourcePath?: string;
+  displayName?: string;
+  canRename: boolean;
+  canUnlink: boolean;
+  canDelete: boolean;
+  canUpdate: boolean;
+}
+
+type ModelWithDisplayName = Model & { displayName?: string };
 
 export async function getIntegrationStatuses(): Promise<IntegrationStatuses> {
   const response = await fetch(`${API_BASE}/api/v1/integrations`);
@@ -150,6 +177,14 @@ export async function getChat(chatId: string): Promise<ChatResponse> {
 export async function getModels(query?: string): Promise<Model[]> {
   try {
     const { models: modelsResponse } = await ollama.list();
+    const displayNames = new Map(
+      (await getManagedModels().catch(() => []))
+        .filter((model) => model.displayName)
+        .map((model) => [
+          model.name.replace(/:latest$/, ""),
+          model.displayName || "",
+        ]),
+    );
 
     let models: Model[] = modelsResponse
       .filter((m: ModelResponse) => {
@@ -169,10 +204,12 @@ export async function getModels(query?: string): Promise<Model[]> {
         // Remove the latest tag from the returned model
         const modelName = m.name.replace(/:latest$/, "");
 
-        return new Model({
+        return Object.assign(new Model({
           model: modelName,
           digest: m.digest,
           modified_at: m.modified_at ? new Date(m.modified_at) : undefined,
+        }), {
+          displayName: displayNames.get(modelName),
         });
       });
 
@@ -181,7 +218,11 @@ export async function getModels(query?: string): Promise<Model[]> {
       const normalizedQuery = query.toLowerCase().trim();
 
       const filteredModels = models.filter((m: Model) => {
-        return m.model.toLowerCase().startsWith(normalizedQuery);
+        const displayName = (m as ModelWithDisplayName).displayName || "";
+        return (
+          m.model.toLowerCase().startsWith(normalizedQuery) ||
+          displayName.toLowerCase().startsWith(normalizedQuery)
+        );
       });
 
       let exactMatch = false;
@@ -207,6 +248,83 @@ export async function getModels(query?: string): Promise<Model[]> {
     return models;
   } catch (err) {
     throw new Error(`Failed to fetch models: ${err}`);
+  }
+}
+
+export async function getManagedModels(): Promise<ManagedModel[]> {
+  const response = await fetch(`${API_BASE}/api/v1/models/manage`);
+  const contentType = response.headers.get("content-type") || "";
+  if (response.ok && contentType.includes("application/json")) {
+    const data = await response.json();
+    return data.models || [];
+  }
+
+  const list = await ollama.list();
+  return list.models
+    .filter((model) => model.digest)
+    .map((model) => {
+      const remoteHost = (model as ModelResponse & { remote_host?: string })
+        .remote_host;
+      return {
+        name: model.model || model.name,
+        size: model.size,
+        digest: model.digest,
+        modified_at: model.modified_at,
+        details: model.details,
+        origin: "ollama_storage",
+        canRename: true,
+        canUnlink: false,
+        canDelete: true,
+        canUpdate: !!remoteHost,
+      };
+    });
+}
+
+export async function deleteModel(model: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/v1/models/delete`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(error || "Failed to delete model");
+  }
+}
+
+export async function unlinkModel(model: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/v1/models/unlink`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to unlink model");
+  }
+}
+
+export async function setModelAlias(
+  model: string,
+  displayName: string,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/v1/models/alias`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model, displayName }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to rename model");
   }
 }
 
@@ -288,6 +406,7 @@ export async function* sendMessage(
   fileTools?: boolean,
   forceUpdate?: boolean,
   think?: boolean | string,
+  uxEstimatedContextTokens?: number,
 ): AsyncGenerator<ChatEventUnion> {
   // Convert Uint8Array to base64 for JSON serialization
   const serializedAttachments = attachments?.map((att) => ({
@@ -318,6 +437,9 @@ export async function* sendMessage(
         file_tools: fileTools ?? false,
         ...(forceUpdate !== undefined ? { forceUpdate } : {}),
         ...(shouldSendThink ? { think } : {}),
+        ...(uxEstimatedContextTokens !== undefined
+          ? { ux_estimated_context_tokens: uxEstimatedContextTokens }
+          : {}),
       }),
     ),
     signal,
@@ -413,6 +535,28 @@ export async function updatePluginEnabled(
   return response.json();
 }
 
+export async function updatePluginToolEnabled(
+  id: string,
+  toolName: string,
+  enabled: boolean,
+): Promise<PluginsResponse> {
+  const response = await fetch(
+    `${API_BASE}/api/v1/plugins/${encodeURIComponent(id)}/tools/${encodeURIComponent(toolName)}`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to update plugin tool");
+  }
+  return response.json();
+}
+
 export async function deletePlugin(id: string): Promise<void> {
   const response = await fetch(`${API_BASE}/api/v1/plugins/${id}`, {
     method: "DELETE",
@@ -421,6 +565,24 @@ export async function deletePlugin(id: string): Promise<void> {
     const error = await response.json().catch(() => null);
     throw new Error(error?.error || "Failed to delete plugin");
   }
+}
+
+export async function importModelFiles(
+  name: string,
+  paths: string[],
+): Promise<{ model: string }> {
+  const response = await fetch(`${API_BASE}/api/v1/models/link`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name, paths }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.error || "Failed to link model");
+  }
+  return response.json();
 }
 
 export async function updateCloudSetting(
@@ -576,6 +738,35 @@ export async function getInferenceCompute(): Promise<InferenceComputeResponse> {
 
   const data = await response.json();
   return new InferenceComputeResponse(data);
+}
+
+export interface GPUPlacement {
+  name: string;
+  vram: number;
+}
+
+export interface RunningModel {
+  name: string;
+  model: string;
+  size: number;
+  size_vram: number;
+  context_length: number;
+  gpu_layers?: number;
+  total_layers?: number;
+  placement?: GPUPlacement[];
+}
+
+export interface RunningModelsResponse {
+  models: RunningModel[];
+}
+
+export async function getRunningModels(): Promise<RunningModelsResponse> {
+  const response = await fetch(`${API_BASE}/api/ps`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch running models: ${response.statusText}`);
+  }
+
+  return response.json();
 }
 
 export async function fetchHealth(): Promise<boolean> {

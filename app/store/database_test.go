@@ -340,6 +340,111 @@ func TestLocalModelsEnabledDefaultsAndMigration(t *testing.T) {
 	}
 }
 
+func TestCPUFallbackEnabledDefaultsAndMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cpu-fallback.db")
+	db, err := newDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	settings, err := db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	if settings.CPUFallbackEnabled {
+		t.Fatal("expected fresh installs to start with cpu fallback disabled")
+	}
+
+	if _, err := db.conn.Exec(`
+		ALTER TABLE settings DROP COLUMN cpu_fallback_enabled;
+		UPDATE settings SET schema_version = 21;
+	`); err != nil {
+		t.Fatalf("failed to seed v21 settings row: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migration from v21 to v22 failed: %v", err)
+	}
+
+	settings, err = db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read migrated settings: %v", err)
+	}
+	if settings.CPUFallbackEnabled {
+		t.Fatal("expected migrated installs to keep cpu fallback disabled by default")
+	}
+}
+
+func TestInferenceEnabledDefaultsAndMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "inference.db")
+	db, err := newDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	settings, err := db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	if settings.InferenceEnabled {
+		t.Fatal("expected fresh installs to start with inference hidden")
+	}
+
+	if _, err := db.conn.Exec(`
+		ALTER TABLE settings DROP COLUMN inference_enabled;
+		UPDATE settings SET schema_version = 22;
+	`); err != nil {
+		t.Fatalf("failed to seed v22 settings row: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migration from v22 to v23 failed: %v", err)
+	}
+
+	settings, err = db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read migrated settings: %v", err)
+	}
+	if settings.InferenceEnabled {
+		t.Fatal("expected migrated installs to keep inference hidden by default")
+	}
+}
+
+func TestInferenceRuntimeDefaultsAndMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "inference-runtime.db")
+	db, err := newDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	settings, err := db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	if settings.InferenceRuntime != "auto" {
+		t.Fatalf("expected fresh installs to default to auto runtime, got %q", settings.InferenceRuntime)
+	}
+
+	if _, err := db.conn.Exec(`
+		ALTER TABLE settings DROP COLUMN inference_runtime;
+		UPDATE settings SET schema_version = 23;
+	`); err != nil {
+		t.Fatalf("failed to seed v23 settings row: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migration from v23 to v24 failed: %v", err)
+	}
+
+	settings, err = db.getSettings()
+	if err != nil {
+		t.Fatalf("failed to read migrated settings: %v", err)
+	}
+	if settings.InferenceRuntime != "auto" {
+		t.Fatalf("expected migrated installs to default to auto runtime, got %q", settings.InferenceRuntime)
+	}
+}
+
 func TestChatDeletionWithCascade(t *testing.T) {
 	t.Run("chat deletion cascades to related messages", func(t *testing.T) {
 		tmpDir := t.TempDir()

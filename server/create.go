@@ -940,6 +940,15 @@ func quantizeLayer(layer *layerGGML, quantizeType string, fn func(resp api.Progr
 }
 
 func copyLayerWithLlamaQuantize(layer *layerGGML, fn func(resp api.ProgressResponse)) (*layerGGML, error) {
+	slog.Info("validating GGUF layer", "digest", layer.Digest, "from", layer.From, "split_parts", len(layer.splitParts), "media_type", layer.MediaType)
+	if len(layer.splitParts) == 0 {
+		newLayer, err := validateLayerWithLlamaQuantize(layer, fn)
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate GGUF with llama-quantize without compatibility patches: %w", err)
+		}
+		return newLayer, nil
+	}
+
 	newLayer, err := rewriteLayerWithLlamaQuantize(layer, "COPY", fn, func(in, out *os.File, progressFn func(uint64)) error {
 		return copyGGUFWithLlamaQuantize(in, out, layer.GGML, progressFn)
 	})
@@ -947,6 +956,45 @@ func copyLayerWithLlamaQuantize(layer *layerGGML, fn func(resp api.ProgressRespo
 		return nil, fmt.Errorf("failed to validate GGUF with llama-quantize without compatibility patches: %w", err)
 	}
 	return newLayer, nil
+}
+
+func validateLayerWithLlamaQuantize(layer *layerGGML, fn func(resp api.ProgressResponse)) (*layerGGML, error) {
+	var doneBytes atomic.Uint64
+	totalBytes := uint64(layer.Size) - layer.GGML.Tensors().Offset
+	fnWrap := func(n uint64) {
+		done := doneBytes.Add(n)
+		progress := float32(done) / float32(totalBytes)
+		fn(api.ProgressResponse{Status: "validating GGUF model", Digest: "0000000000000000000", Total: layer.Size, Completed: int64(progress * float32(layer.Size))})
+	}
+
+	blob, err := manifest.BlobsPath(layer.Digest)
+	if err != nil {
+		return nil, err
+	}
+	in, err := os.Open(blob)
+	if err != nil {
+		return nil, err
+	}
+	defer in.Close()
+
+	temp, err := os.CreateTemp(filepath.Dir(blob), "ollama-gguf-validate-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(temp.Name())
+	defer temp.Close()
+
+	if err := copyGGUFWithLlamaQuantize(in, temp, layer.GGML, fnWrap); err != nil {
+		return nil, err
+	}
+
+	newLayer, err := manifest.NewLayerFromLayer(layer.Digest, layer.MediaType, layer.From)
+	if err != nil {
+		return nil, err
+	}
+	newLayer.Status = fmt.Sprintf("using existing validated layer %s", layer.Digest)
+
+	return &layerGGML{Layer: newLayer, GGML: layer.GGML}, nil
 }
 
 func copySplitLayerPreservingTensors(layer *layerGGML) (*layerGGML, error) {

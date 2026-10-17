@@ -227,6 +227,34 @@ func TestStore(t *testing.T) {
 	})
 }
 
+func TestToolsSettingSurvivesStoreRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "db.sqlite")
+
+	first := &Store{DBPath: dbPath}
+	settings, err := first.Settings()
+	if err != nil {
+		t.Fatalf("Settings() before restart: %v", err)
+	}
+	settings.Tools = true
+	if err := first.SetSettings(settings); err != nil {
+		t.Fatalf("SetSettings(): %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close() first store: %v", err)
+	}
+
+	second := &Store{DBPath: dbPath}
+	defer second.Close()
+	reloaded, err := second.Settings()
+	if err != nil {
+		t.Fatalf("Settings() after restart: %v", err)
+	}
+	if !reloaded.Tools {
+		t.Fatal("Tools setting was not preserved across store restart")
+	}
+}
+
 func TestOnboardingVersionRoundTrip(t *testing.T) {
 	s, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -328,6 +356,84 @@ func TestLocalModelsEnabledRoundTrip(t *testing.T) {
 	}
 	if loaded.LocalModelsEnabled {
 		t.Fatal("expected LocalModelsEnabled to persist as false")
+	}
+}
+
+func TestCPUFallbackEnabledRoundTrip(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	settings, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.CPUFallbackEnabled {
+		t.Fatal("expected CPUFallbackEnabled to be false by default")
+	}
+
+	settings.CPUFallbackEnabled = true
+	if err := s.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.CPUFallbackEnabled {
+		t.Fatal("expected CPUFallbackEnabled to persist")
+	}
+}
+
+func TestInferenceEnabledRoundTrip(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	settings, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.InferenceEnabled {
+		t.Fatal("expected InferenceEnabled to be false by default")
+	}
+
+	settings.InferenceEnabled = true
+	if err := s.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.InferenceEnabled {
+		t.Fatal("expected InferenceEnabled to persist")
+	}
+}
+
+func TestInferenceRuntimeRoundTrip(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	settings, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.InferenceRuntime != "auto" {
+		t.Fatalf("expected InferenceRuntime to default to auto, got %q", settings.InferenceRuntime)
+	}
+
+	settings.InferenceRuntime = "cuda_legacy"
+	if err := s.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.InferenceRuntime != "cuda_legacy" {
+		t.Fatalf("expected InferenceRuntime to persist, got %q", loaded.InferenceRuntime)
 	}
 }
 

@@ -280,6 +280,17 @@ func TestCreateModelValidatesTextOnlyFileGGUFWithoutQuantization(t *testing.T) {
 	if gotTypeName != "COPY" {
 		t.Fatalf("llama-quantize type = %q, want COPY", gotTypeName)
 	}
+
+	mf, err := manifest.ParseNamedManifest(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mf.Layers) == 0 {
+		t.Fatal("created manifest is missing layers")
+	}
+	if mf.Layers[0].Digest != digest {
+		t.Fatalf("model layer digest = %q, want original digest %q", mf.Layers[0].Digest, digest)
+	}
 }
 
 func TestCreateModelValidatesSplitGGUFWithOriginalShardNames(t *testing.T) {

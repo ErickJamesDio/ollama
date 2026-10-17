@@ -1,5 +1,6 @@
 import CopyButton from "@/components/CopyButton";
 import Logo from "@/components/Logo";
+import { Tooltip } from "@/components/ui/tooltip";
 import { nextOnboardingStep, type OnboardingStep } from "@/lib/onboarding";
 import {
   getIntegrationStatuses,
@@ -786,23 +787,24 @@ export function ConnectAppsScreen({
           <code className="block flex-1 whitespace-nowrap py-2 pr-2 font-mono text-[13px] text-neutral-500 dark:text-neutral-300">
             {item.command}
           </code>
-          <button
-            type="button"
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-neutral-500 transition-colors hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
-            onClick={() => copyLaunchCommand(item)}
-            aria-label={
-              copied
-                ? `${item.name} command copied`
-                : `Copy ${item.name} command`
-            }
-            title={copied ? "Copied" : "Copy command"}
-          >
-            {copied ? (
-              <CheckIcon className="h-4 w-4 text-green-600" />
-            ) : (
-              <Square2StackIcon className="h-4 w-4" />
-            )}
-          </button>
+          <Tooltip content={copied ? "Copied" : "Copy command"}>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-neutral-500 transition-colors hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
+              onClick={() => copyLaunchCommand(item)}
+              aria-label={
+                copied
+                  ? `${item.name} command copied`
+                  : `Copy ${item.name} command`
+              }
+            >
+              {copied ? (
+                <CheckIcon className="h-4 w-4 text-green-600" />
+              ) : (
+                <Square2StackIcon className="h-4 w-4" />
+              )}
+            </button>
+          </Tooltip>
         </div>
       </div>
     );
@@ -849,28 +851,29 @@ export function ConnectAppsScreen({
             {claudeStatusLabel}
           </span>
         )}
-        <button
-          type="button"
-          role="switch"
-          aria-checked={claudeConfigured}
-          aria-busy={isConnectingClaude || undefined}
-          aria-label={
-            claudeConfigured
-              ? "Disconnect Claude"
-              : isConnectingClaude
-                ? "Connecting Claude"
-                : "Connect Claude"
-          }
-          title={claudeConfigured ? "Disconnect" : "Connect"}
-          disabled={isConnectingClaude}
-          onClick={connectClaude}
-          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500 disabled:cursor-wait ${claudeConfigured ? "bg-neutral-950" : "bg-neutral-300"}`}
-        >
-          <span
-            aria-hidden="true"
-            className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${isConnectingClaude ? "animate-pulse" : ""} ${claudeConfigured ? "translate-x-4.5" : "translate-x-0.5"}`}
-          />
-        </button>
+        <Tooltip content={claudeConfigured ? "Disconnect" : "Connect"}>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={claudeConfigured}
+            aria-busy={isConnectingClaude || undefined}
+            aria-label={
+              claudeConfigured
+                ? "Disconnect Claude"
+                : isConnectingClaude
+                  ? "Connecting Claude"
+                  : "Connect Claude"
+            }
+            disabled={isConnectingClaude}
+            onClick={connectClaude}
+            className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500 disabled:cursor-wait ${claudeConfigured ? "bg-neutral-950" : "bg-neutral-300"}`}
+          >
+            <span
+              aria-hidden="true"
+              className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${isConnectingClaude ? "animate-pulse" : ""} ${claudeConfigured ? "translate-x-4.5" : "translate-x-0.5"}`}
+            />
+          </button>
+        </Tooltip>
       </div>
     </div>
   ) : null;

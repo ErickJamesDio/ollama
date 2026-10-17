@@ -8,6 +8,31 @@
 
 Start building with open models.
 
+## Fork local model storage
+
+This fork treats the user GGUF library as the physical source of local models.
+The configured Model location is authoritative when set by the user.
+
+Expected layout:
+
+```text
+<Model location>\
+  manifests\
+  blobs\
+  Qwen3.5-9B-GGUF\
+  gemma-4-E4B-it-GGUF\
+  ...
+```
+
+`manifests` and `blobs` keep the native Ollama catalog/runtime format.
+User GGUF folders keep the original model files organized by the user. Link
+GGUF creates native manifests and hardlinks in `blobs\sha256-*`, so Ollama can
+see the model without duplicating the GGUF bytes.
+
+Hardlinks require the source GGUF and `blobs` directory to be on the same
+Windows volume. If they are on different drives, Link GGUF should fail with a
+clear error instead of silently copying the model.
+
 ## Download
 
 ### macOS

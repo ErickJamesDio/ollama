@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -125,14 +126,16 @@ func runLlamaQuantizeCommand(in, out *os.File, orig *fsggml.GGML, newFileType fs
 
 	args := llamaQuantizeArgs(orig.KV().Architecture(), newFileType, in.Name(), out.Name(), typeName)
 	cmd := exec.Command(quantizeExe, args...)
-	cmd.Env = llamaQuantizeEnv(os.Environ(), hasEmbeddedCompatibilityTensors(orig))
+	cmd.Env = llamaQuantizeEnv(os.Environ(), quantizeExe, hasEmbeddedCompatibilityTensors(orig))
+	slog.Info("llama-quantize command", "path", cmd.Path, "args", cmd.Args, "dir", cmd.Dir, "path_env", envValue(cmd.Env, "PATH"), "compat", envValue(cmd.Env, llamaCppCompatEnv))
 
 	// Parse progress from stdout
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start llama-quantize: %w", err)
@@ -163,10 +166,23 @@ func runLlamaQuantizeCommand(in, out *os.File, orig *fsggml.GGML, newFileType fs
 	}
 
 	if err := cmd.Wait(); err != nil {
+		if stderr.Len() > 0 {
+			slog.Warn("llama-quantize stderr", "stderr", stderr.String())
+		}
 		return fmt.Errorf("llama-quantize failed: %w", err)
 	}
 
 	return nil
+}
+
+func envValue(env []string, key string) string {
+	prefix := strings.ToUpper(key) + "="
+	for _, entry := range env {
+		if strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			return entry[len(key)+1:]
+		}
+	}
+	return ""
 }
 
 func disableLlamaCppCompat(env []string) []string {
@@ -180,18 +196,51 @@ func disableLlamaCppCompat(env []string) []string {
 	return append(out, llamaCppCompatEnv+"=0")
 }
 
-func llamaQuantizeEnv(env []string, enableCompat bool) []string {
+func llamaQuantizeEnv(env []string, quantizeExe string, enableCompat bool) []string {
 	if !enableCompat {
-		return disableLlamaCppCompat(env)
+		env = disableLlamaCppCompat(env)
+	} else {
+		out := make([]string, 0, len(env))
+		prefix := llamaCppCompatEnv + "="
+		for _, entry := range env {
+			if !strings.HasPrefix(entry, prefix) {
+				out = append(out, entry)
+			}
+		}
+		env = out
 	}
 
-	out := make([]string, 0, len(env))
-	prefix := llamaCppCompatEnv + "="
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			out = append(out, entry)
+	return prependLlamaQuantizePath(env, quantizeExe)
+}
+
+func prependLlamaQuantizePath(env []string, quantizeExe string) []string {
+	dir := filepath.Dir(quantizeExe)
+	dirs := []string{dir}
+
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				dirs = append(dirs, filepath.Join(dir, entry.Name()))
+			}
 		}
 	}
+
+	prefix := "PATH="
+	out := make([]string, 0, len(env)+1)
+	updated := false
+	for _, entry := range env {
+		if strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			out = append(out, "PATH="+strings.Join(append(dirs, strings.TrimPrefix(entry, entry[:len(prefix)])), string(os.PathListSeparator)))
+			updated = true
+			continue
+		}
+		out = append(out, entry)
+	}
+	if !updated {
+		out = append(out, "PATH="+strings.Join(dirs, string(os.PathListSeparator)))
+	}
+
 	return out
 }
 

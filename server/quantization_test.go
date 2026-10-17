@@ -155,6 +155,13 @@ func TestDisableLlamaCppCompat(t *testing.T) {
 
 func TestLlamaQuantizeEnv(t *testing.T) {
 	env := []string{"A=1", llamaCppCompatEnv + "=0", "B=2"}
+	binDir := t.TempDir()
+	backendDir := filepath.Join(binDir, "cuda_legacy")
+	if err := os.Mkdir(backendDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	quantizeExe := filepath.Join(binDir, "llama-quantize")
+	pathEntry := "PATH=" + binDir + string(os.PathListSeparator) + backendDir
 	tests := []struct {
 		name         string
 		enableCompat bool
@@ -163,18 +170,18 @@ func TestLlamaQuantizeEnv(t *testing.T) {
 		{
 			name:         "clean GGUF validation disables compat",
 			enableCompat: false,
-			want:         []string{"A=1", "B=2", llamaCppCompatEnv + "=0"},
+			want:         []string{"A=1", "B=2", llamaCppCompatEnv + "=0", pathEntry},
 		},
 		{
 			name:         "embedded compatibility quantization allows compat",
 			enableCompat: true,
-			want:         []string{"A=1", "B=2"},
+			want:         []string{"A=1", "B=2", pathEntry},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := llamaQuantizeEnv(env, tt.enableCompat); !slices.Equal(got, tt.want) {
+			if got := llamaQuantizeEnv(env, quantizeExe, tt.enableCompat); !slices.Equal(got, tt.want) {
 				t.Fatalf("llamaQuantizeEnv = %#v, want %#v", got, tt.want)
 			}
 		})

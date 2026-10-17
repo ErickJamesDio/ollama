@@ -5,7 +5,6 @@ import { Input } from "@/components/ui/input";
 import { Field, Label, Description } from "@/components/ui/fieldset";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
 import { ClaudeDesktopModelsSettings } from "@/components/ClaudeDesktopModelsSettings";
 import {
   WifiIcon,
@@ -16,20 +15,30 @@ import {
   CogIcon,
   ArrowDownTrayIcon,
   Squares2X2Icon,
+  TrashIcon,
 } from "@heroicons/react/20/solid";
 import { CpuChipIcon, PuzzlePieceIcon } from "@heroicons/react/24/outline";
-import { Settings as SettingsType } from "@/gotypes";
+import { Model, Settings as SettingsType } from "@/gotypes";
 import { isWindowsPlatform } from "@/lib/platform";
+import { useSettings } from "@/hooks/useSettings";
 import { useUser } from "@/hooks/useUser";
 import { useCloudStatus } from "@/hooks/useCloudStatus";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  getSettings,
+  deleteModel,
+  getManagedModels,
+  getModelUpstreamInfo,
+  importModelFiles,
+  setModelAlias,
   type CloudStatusResponse,
+  type ManagedModel,
+  unlinkModel,
   updateCloudSetting,
-  updateSettings,
-  getInferenceCompute,
 } from "@/api";
+
+type Appearance = "system" | "light" | "dark";
+
+const APPEARANCE_KEY = "ollama-appearance";
 
 function AnimatedDots() {
   return (
@@ -45,13 +54,79 @@ function AnimatedDots() {
   );
 }
 
+function deriveImportedModelName(path: string) {
+  const filename = path.split(/[\\/]/).pop() || "imported-model.gguf";
+  const withoutExtension = filename.replace(/\.gguf$/i, "");
+  const normalized = withoutExtension
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized ? `${normalized}:latest` : "imported-model:latest";
+}
+
+function formatModelSize(size?: number) {
+  if (!size || size <= 0) {
+    return "Unknown size";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = size;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const precision = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function modelDetails(model: ManagedModel) {
+  const details = model.details;
+  const parts = [
+    details?.format?.toUpperCase(),
+    details?.parameter_size,
+    details?.quantization_level,
+  ].filter(Boolean);
+
+  return parts.length > 0 ? parts.join(" ") : "Installed model";
+}
+
+function modelOriginLabel(model: ManagedModel) {
+  return model.origin === "linked_gguf" ? "Linked GGUF" : "Ollama storage";
+}
+
+function normalizeModelName(name: string) {
+  return name.replace(/:latest$/, "");
+}
+
 export default function Settings() {
   const queryClient = useQueryClient();
   const [showSaved, setShowSaved] = useState(false);
+  const [appearance, setAppearance] = useState<Appearance>(() => {
+    const saved = window.localStorage.getItem(APPEARANCE_KEY);
+    if (saved === "light" || saved === "dark" || saved === "system")
+      return saved;
+    return "system";
+  });
   const [modelsPath, setModelsPath] = useState("");
   const [restartMessage, setRestartMessage] = useState(false);
+  const [importModelError, setImportModelError] = useState<string | null>(null);
+  const [importModelPaths, setImportModelPaths] = useState<string[] | null>(
+    null,
+  );
+  const [importModelName, setImportModelName] = useState("");
+  const [showModelManager, setShowModelManager] = useState(false);
+  const [deleteModelError, setDeleteModelError] = useState<string | null>(null);
+  const [modelManagerMessage, setModelManagerMessage] = useState<string | null>(
+    null,
+  );
   const [showAppsInMenu, setShowAppsInMenuState] = useState(true);
   const [showAppsInMenuPending, setShowAppsInMenuPending] = useState(false);
+  const { settingsData, error, setSettings } = useSettings();
   const {
     user,
     isAuthenticated,
@@ -70,53 +145,42 @@ export default function Settings() {
     cloudStatus,
     isLoading: cloudStatusLoading,
   } = useCloudStatus();
-
-  const {
-    data: settingsData,
-    isLoading: loading,
-    error,
-  } = useQuery({
-    queryKey: ["settings"],
-    queryFn: getSettings,
+  const settings = settingsData || null;
+  const installedModelsQuery = useQuery({
+    queryKey: ["managedModels"],
+    queryFn: getManagedModels,
+    enabled: showModelManager,
   });
 
-  const settings = settingsData?.settings || null;
+  const applyAppearance = (value: Appearance) => {
+    const systemDark = window.matchMedia(
+      "(prefers-color-scheme: dark)",
+    ).matches;
+    const useDark = value === "dark" || (value === "system" && systemDark);
+    document.documentElement.classList.toggle("dark", useDark);
+  };
+
+  const changeAppearance = (value: Appearance) => {
+    setAppearance(value);
+    window.localStorage.setItem(APPEARANCE_KEY, value);
+    applyAppearance(value);
+  };
+
+  useEffect(() => {
+    applyAppearance(appearance);
+    if (appearance !== "system") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleSystemAppearanceChange = () => applyAppearance("system");
+    media.addEventListener("change", handleSystemAppearanceChange);
+    return () =>
+      media.removeEventListener("change", handleSystemAppearanceChange);
+  }, [appearance]);
 
   useEffect(() => {
     if (settings?.Models !== undefined) {
       setModelsPath(settings.Models || "");
     }
   }, [settings?.Models]);
-
-  const { data: inferenceComputeResponse } = useQuery({
-    queryKey: ["inferenceCompute"],
-    queryFn: getInferenceCompute,
-  });
-
-  const defaultContextLength = inferenceComputeResponse?.defaultContextLength;
-
-  const updateSettingsMutation = useMutation({
-    mutationFn: updateSettings,
-    onMutate: async (nextSettings) => {
-      await queryClient.cancelQueries({ queryKey: ["settings"] });
-      const previousSettings = queryClient.getQueryData(["settings"]);
-      queryClient.setQueryData(["settings"], {
-        settings: nextSettings,
-      });
-      return { previousSettings };
-    },
-    onError: (_error, _nextSettings, context) => {
-      if (context?.previousSettings !== undefined) {
-        queryClient.setQueryData(["settings"], context.previousSettings);
-      }
-    },
-    onSuccess: (data) => {
-      queryClient.setQueryData(["settings"], data);
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      setShowSaved(true);
-      setTimeout(() => setShowSaved(false), 1500);
-    },
-  });
 
   const updateCloudMutation = useMutation({
     mutationFn: (enabled: boolean) => updateCloudSetting(enabled),
@@ -159,6 +223,117 @@ export default function Settings() {
 
       setShowSaved(true);
       setTimeout(() => setShowSaved(false), 1500);
+    },
+  });
+
+  const importModelMutation = useMutation({
+    mutationFn: ({ name, paths }: { name: string; paths: string[] }) =>
+      importModelFiles(name, paths),
+    onSuccess: () => {
+      setImportModelError(null);
+      setImportModelPaths(null);
+      setImportModelName("");
+      queryClient.invalidateQueries({ queryKey: ["models"] });
+      setShowSaved(true);
+      setTimeout(() => setShowSaved(false), 1500);
+    },
+    onError: (error) => {
+      setImportModelError(
+        error instanceof Error ? error.message : "Failed to import model",
+      );
+    },
+  });
+
+  const deleteModelMutation = useMutation({
+    mutationFn: (model: string) => deleteModel(model),
+    onSuccess: async (_result, model) => {
+      setDeleteModelError(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["models"] }),
+        queryClient.invalidateQueries({ queryKey: ["managedModels"] }),
+      ]);
+
+      const selected = settings?.SelectedModel || "";
+      if (
+        selected === model ||
+        normalizeModelName(selected) === normalizeModelName(model)
+      ) {
+        await setSettings({ SelectedModel: "" });
+      }
+
+      setShowSaved(true);
+      setTimeout(() => setShowSaved(false), 1500);
+    },
+    onError: (error) => {
+      setDeleteModelError(
+        error instanceof Error ? error.message : "Failed to remove model",
+      );
+    },
+  });
+
+  const unlinkModelMutation = useMutation({
+    mutationFn: (model: string) => unlinkModel(model),
+    onSuccess: async (_result, model) => {
+      setDeleteModelError(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["models"] }),
+        queryClient.invalidateQueries({ queryKey: ["managedModels"] }),
+      ]);
+
+      const selected = settings?.SelectedModel || "";
+      if (
+        selected === model ||
+        normalizeModelName(selected) === normalizeModelName(model)
+      ) {
+        await setSettings({ SelectedModel: "" });
+      }
+
+      setShowSaved(true);
+      setTimeout(() => setShowSaved(false), 1500);
+    },
+    onError: (error) => {
+      setDeleteModelError(
+        error instanceof Error ? error.message : "Failed to unlink model",
+      );
+    },
+  });
+
+  const renameModelMutation = useMutation({
+    mutationFn: ({
+      model,
+      displayName,
+    }: {
+      model: string;
+      displayName: string;
+    }) => setModelAlias(model, displayName),
+    onSuccess: async () => {
+      setDeleteModelError(null);
+      await queryClient.invalidateQueries({ queryKey: ["managedModels"] });
+      setShowSaved(true);
+      setTimeout(() => setShowSaved(false), 1500);
+    },
+    onError: (error) => {
+      setDeleteModelError(
+        error instanceof Error ? error.message : "Failed to rename model",
+      );
+    },
+  });
+
+  const checkModelUpdateMutation = useMutation({
+    mutationFn: (model: string) => getModelUpstreamInfo(new Model({ model })),
+    onSuccess: (result, model) => {
+      setDeleteModelError(null);
+      setModelManagerMessage(
+        result.stale
+          ? `${model} has an upstream update available.`
+          : `${model} is up to date.`,
+      );
+    },
+    onError: (error) => {
+      setModelManagerMessage(null);
+      setDeleteModelError(
+        error instanceof Error ? error.message : "Failed to check update",
+      );
     },
   });
 
@@ -217,47 +392,95 @@ export default function Settings() {
   }, [pollingInterval]);
 
   const handleChange = useCallback(
-    (field: keyof SettingsType, value: boolean | string | number) => {
+    async (field: keyof SettingsType, value: boolean | string | number) => {
       const currentSettings =
         queryClient.getQueryData<{ settings: SettingsType }>(["settings"])
           ?.settings ?? settings;
-      if (currentSettings) {
-        const updatedSettings = new SettingsType({
-          ...currentSettings,
-          [field]: value,
-        });
-
-        // If context length is being changed, show restart message
-        if (
-          field === "ContextLength" &&
-          value !== currentSettings.ContextLength
-        ) {
-          setRestartMessage(true);
-          // Hide restart message after 3 seconds
-          setTimeout(() => setRestartMessage(false), 3000);
-        }
-
-        updateSettingsMutation.mutate(updatedSettings);
+      if (!currentSettings) {
+        return;
       }
+
+      if (
+        field === "ContextLength" &&
+        value !== currentSettings.ContextLength
+      ) {
+        setRestartMessage(true);
+        setTimeout(() => setRestartMessage(false), 3000);
+      }
+
+      await setSettings({ [field]: value } as Partial<SettingsType>);
+      setShowSaved(true);
+      setTimeout(() => setShowSaved(false), 1500);
     },
-    [queryClient, settings, updateSettingsMutation],
+    [queryClient, setSettings, settings],
   );
 
-  const handleResetToDefaults = () => {
-    if (settings) {
-      const defaultSettings = new SettingsType({
-        Expose: false,
-        Browser: false,
-        Models: "",
-        Agent: false,
-        Tools: false,
-        LocalModelsEnabled: true,
-        PluginsEnabled: false,
-        ContextLength: 0,
-        AutoUpdateEnabled: true,
-      });
-      updateSettingsMutation.mutate(defaultSettings);
+  const handleResetToDefaults = async () => {
+    if (!settings) {
+      return;
     }
+
+    await setSettings({
+      Expose: false,
+      Browser: false,
+      Models: "",
+      Agent: false,
+      Tools: false,
+      LocalModelsEnabled: true,
+      CPUFallbackEnabled: false,
+      InferenceEnabled: false,
+      InferenceRuntime: "auto",
+      InferenceAutoFitEnabled: true,
+      InferenceManualLayers: "",
+      PluginsEnabled: false,
+      ContextLength: 0,
+      AutoUpdateEnabled: true,
+    });
+
+    setShowSaved(true);
+    setTimeout(() => setShowSaved(false), 1500);
+  };
+
+  const handleImportModel = async () => {
+    setImportModelError(null);
+
+    if (!window.webview?.selectModelFiles) {
+      setImportModelError("Model import is only available in the desktop app.");
+      return;
+    }
+
+    let paths: string[] | null;
+    try {
+      paths = await window.webview.selectModelFiles();
+    } catch (error) {
+      setImportModelError(
+        error instanceof Error
+          ? error.message
+          : "Failed to select model files.",
+      );
+      return;
+    }
+    if (!paths || paths.length === 0) {
+      return;
+    }
+
+    setImportModelPaths(paths);
+    setImportModelName(deriveImportedModelName(paths[0]));
+  };
+
+  const handleConfirmImportModel = async () => {
+    if (!importModelPaths || importModelPaths.length === 0) {
+      setImportModelError("Choose at least one GGUF file first.");
+      return;
+    }
+
+    const name = importModelName.trim();
+    if (!name) {
+      setImportModelError("Model name is required.");
+      return;
+    }
+
+    importModelMutation.mutate({ name, paths: importModelPaths });
   };
 
   const handleShowAppsInMenu = async (checked: boolean) => {
@@ -316,7 +539,7 @@ export default function Settings() {
     }
   };
 
-  if (loading) {
+  if (!settingsData && !error) {
     return null;
   }
 
@@ -334,6 +557,34 @@ export default function Settings() {
     <main className="flex min-h-0 w-full flex-1 flex-col select-none dark:bg-neutral-900">
       <div className="w-full px-6 pb-6 pt-4 overflow-y-auto flex-1 overscroll-contain">
         <div className="mx-auto max-w-4xl space-y-4">
+          {/* Appearance */}
+          <div className="flex items-center justify-between gap-6 rounded-xl bg-white p-4 dark:bg-neutral-800">
+            <div>
+              <div className="text-sm font-medium text-neutral-950 dark:text-white">
+                Appearance
+              </div>
+              <div className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+                Choose how Ollama looks.
+              </div>
+            </div>
+            <div className="flex rounded-lg bg-neutral-100 p-1 dark:bg-neutral-800">
+              {(["system", "light", "dark"] as Appearance[]).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => changeAppearance(value)}
+                  className={`rounded-md px-3 py-1.5 text-sm capitalize transition-colors ${
+                    appearance === value
+                      ? "bg-white text-neutral-950 shadow-sm dark:bg-neutral-700 dark:text-white"
+                      : "text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white"
+                  }`}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Connect Ollama Account */}
           <div className="overflow-hidden rounded-xl bg-white dark:bg-neutral-800">
             <div className="p-4">
@@ -485,9 +736,9 @@ export default function Settings() {
                   <div className="flex-shrink-0">
                     <Switch
                       checked={settings.LocalModelsEnabled}
-                      onChange={(checked) =>
-                        handleChange("LocalModelsEnabled", checked)
-                      }
+                      onChange={(checked) => {
+                        void handleChange("LocalModelsEnabled", checked);
+                      }}
                     />
                   </div>
                 </div>
@@ -532,9 +783,9 @@ export default function Settings() {
                   <div className="flex-shrink-0">
                     <Switch
                       checked={settings.AutoUpdateEnabled}
-                      onChange={(checked) =>
-                        handleChange("AutoUpdateEnabled", checked)
-                      }
+                      onChange={(checked) => {
+                        void handleChange("AutoUpdateEnabled", checked);
+                      }}
                     />
                   </div>
                 </div>
@@ -555,7 +806,9 @@ export default function Settings() {
                   <div className="flex-shrink-0">
                     <Switch
                       checked={settings.Expose}
-                      onChange={(checked) => handleChange("Expose", checked)}
+                      onChange={(checked) => {
+                        void handleChange("Expose", checked);
+                      }}
                     />
                   </div>
                 </div>
@@ -587,6 +840,31 @@ export default function Settings() {
                         type="button"
                         outline
                         className="px-2"
+                        disabled={importModelMutation.isPending}
+                        onClick={() => {
+                          void handleImportModel();
+                        }}
+                      >
+                        <ArrowDownTrayIcon className="w-4 h-4 mr-1" />
+                        {importModelMutation.isPending
+                          ? "Linking..."
+                          : "Link GGUF"}
+                      </Button>
+                      <Button
+                        type="button"
+                        outline
+                        className="px-2"
+                        onClick={() => {
+                          setShowModelManager((value) => !value);
+                          setDeleteModelError(null);
+                        }}
+                      >
+                        Manage
+                      </Button>
+                      <Button
+                        type="button"
+                        outline
+                        className="px-2"
                         onClick={async () => {
                           if (window.webview?.selectModelsDirectory) {
                             try {
@@ -594,7 +872,7 @@ export default function Settings() {
                                 await window.webview.selectModelsDirectory();
                               if (directory) {
                                 setModelsPath(directory);
-                                handleChange("Models", directory);
+                                await handleChange("Models", directory);
                               }
                             } catch (error) {
                               console.error(
@@ -609,40 +887,229 @@ export default function Settings() {
                         Browse
                       </Button>
                     </div>
+                    {importModelPaths && (
+                      <div className="mt-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-700 dark:bg-neutral-900/40">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                          <div className="min-w-0 flex-1">
+                            <Label>Linked model name</Label>
+                            <Description>
+                              {importModelPaths.length} GGUF file
+                              {importModelPaths.length === 1 ? "" : "s"}{" "}
+                              selected.
+                            </Description>
+                            <Input
+                              className="mt-2"
+                              value={importModelName}
+                              onChange={(e) =>
+                                setImportModelName(e.target.value)
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  void handleConfirmImportModel();
+                                }
+                              }}
+                            />
+                          </div>
+                          <div className="flex flex-shrink-0 gap-2">
+                            <Button
+                              type="button"
+                              outline
+                              disabled={importModelMutation.isPending}
+                              onClick={() => {
+                                void handleConfirmImportModel();
+                              }}
+                            >
+                              {importModelMutation.isPending
+                                ? "Linking..."
+                                : "Link model"}
+                            </Button>
+                            <Button
+                              type="button"
+                              plain
+                              disabled={importModelMutation.isPending}
+                              onClick={() => {
+                                setImportModelPaths(null);
+                                setImportModelName("");
+                                setImportModelError(null);
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {importModelError && (
+                      <p className="mt-2 text-sm text-red-600 dark:text-red-400">
+                        {importModelError}
+                      </p>
+                    )}
+                    {showModelManager && (
+                      <div className="mt-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-700 dark:bg-neutral-900/40">
+                        <div className="mb-3 flex items-start justify-between gap-3">
+                          <div>
+                            <Label>Manage models</Label>
+                            <Description>
+                              Rename, unlink linked GGUFs, or delete models
+                              stored by Ollama.
+                            </Description>
+                          </div>
+                          <Button
+                            type="button"
+                            plain
+                            className="px-2"
+                            onClick={() => {
+                              void installedModelsQuery.refetch();
+                            }}
+                          >
+                            Refresh
+                          </Button>
+                        </div>
+                        {installedModelsQuery.isLoading ? (
+                          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                            Loading models...
+                          </p>
+                        ) : installedModelsQuery.data?.length ? (
+                          <div className="max-h-72 overflow-y-auto rounded-lg border border-neutral-200 dark:border-neutral-700">
+                            {installedModelsQuery.data.map((model) => (
+                              <div
+                                key={`${model.name}-${model.digest}`}
+                                className="flex items-center justify-between gap-3 border-b border-neutral-200 px-3 py-2 last:border-b-0 dark:border-neutral-700"
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate text-sm font-medium text-neutral-950 dark:text-white">
+                                    {model.name}
+                                  </div>
+                                  <div className="mt-1">
+                                    <Input
+                                      className="h-8 text-sm"
+                                      defaultValue={model.displayName || ""}
+                                      placeholder="Display name"
+                                      disabled={renameModelMutation.isPending}
+                                      onBlur={(event) => {
+                                        const displayName =
+                                          event.currentTarget.value.trim();
+                                        if (
+                                          displayName !==
+                                          (model.displayName || "")
+                                        ) {
+                                          renameModelMutation.mutate({
+                                            model: model.name,
+                                            displayName,
+                                          });
+                                        }
+                                      }}
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                          event.currentTarget.blur();
+                                        }
+                                      }}
+                                    />
+                                  </div>
+                                  <div className="mt-1 truncate text-xs text-neutral-500 dark:text-neutral-400">
+                                    {modelOriginLabel(model)} ·{" "}
+                                    {modelDetails(model)} ·{" "}
+                                    {formatModelSize(model.size)}
+                                  </div>
+                                  {model.sourcePath && (
+                                    <div className="mt-0.5 truncate text-xs text-neutral-500 dark:text-neutral-400">
+                                      {model.sourcePath}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex flex-shrink-0 gap-1">
+                                  {model.canUpdate && (
+                                    <Button
+                                      type="button"
+                                      plain
+                                      className="px-2"
+                                      disabled={
+                                        checkModelUpdateMutation.isPending
+                                      }
+                                      onClick={() =>
+                                        checkModelUpdateMutation.mutate(
+                                          model.name,
+                                        )
+                                      }
+                                    >
+                                      Check Update
+                                    </Button>
+                                  )}
+                                  {model.canUnlink && (
+                                    <Button
+                                      type="button"
+                                      plain
+                                      className="px-2 text-red-600 dark:text-red-400"
+                                      disabled={unlinkModelMutation.isPending}
+                                      onClick={() => {
+                                        unlinkModelMutation.mutate(model.name);
+                                      }}
+                                    >
+                                      Unlink
+                                    </Button>
+                                  )}
+                                  {model.canDelete && (
+                                    <Button
+                                      type="button"
+                                      plain
+                                      className="px-2 text-red-600 dark:text-red-400"
+                                      disabled={deleteModelMutation.isPending}
+                                      onClick={() => {
+                                        deleteModelMutation.mutate(model.name);
+                                      }}
+                                    >
+                                      <TrashIcon className="h-4 w-4" />
+                                      Delete
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                            No installed models found.
+                          </p>
+                        )}
+                        {deleteModelError && (
+                          <p className="mt-2 text-sm text-red-600 dark:text-red-400">
+                            {deleteModelError}
+                          </p>
+                        )}
+                        {modelManagerMessage && (
+                          <p className="mt-2 text-sm text-neutral-500 dark:text-neutral-400">
+                            {modelManagerMessage}
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </Field>
+            </div>
+          </div>
 
-              {/* Context Length */}
+          <div className="overflow-hidden rounded-xl bg-white dark:bg-neutral-800">
+            <div className="p-4">
               <Field>
-                <div className="flex items-start space-x-3">
-                  <CogIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
-                  <div className="w-full">
-                    <Label>Context length</Label>
-                    <Description>
-                      Context length determines how much of your conversation
-                      local LLMs can remember and use to generate responses.
-                    </Description>
-                    <div className="mt-3">
-                      <Slider
-                        value={
-                          settings.ContextLength || defaultContextLength || 0
-                        }
-                        onChange={(value) => {
-                          handleChange("ContextLength", value);
-                        }}
-                        disabled={!defaultContextLength}
-                        options={[
-                          { value: 4096, label: "4k" },
-                          { value: 8192, label: "8k" },
-                          { value: 16384, label: "16k" },
-                          { value: 32768, label: "32k" },
-                          { value: 65536, label: "64k" },
-                          { value: 131072, label: "128k" },
-                          { value: 262144, label: "256k" },
-                        ]}
-                      />
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start space-x-3 flex-1">
+                    <CogIcon className="mt-1 h-5 w-5 flex-shrink-0 text-black dark:text-neutral-100" />
+                    <div>
+                      <Label>Inference</Label>
+                      <Description>
+                        Show the Inference section with advanced local model
+                        controls.
+                      </Description>
                     </div>
+                  </div>
+                  <div className="flex-shrink-0">
+                    <Switch
+                      checked={settings.InferenceEnabled}
+                      onChange={(checked) => {
+                        void handleChange("InferenceEnabled", checked);
+                      }}
+                    />
                   </div>
                 </div>
               </Field>
@@ -666,9 +1133,9 @@ export default function Settings() {
                   <div className="flex-shrink-0">
                     <Switch
                       checked={settings.PluginsEnabled}
-                      onChange={(checked) =>
-                        handleChange("PluginsEnabled", checked)
-                      }
+                      onChange={(checked) => {
+                        void handleChange("PluginsEnabled", checked);
+                      }}
                     />
                   </div>
                 </div>
@@ -695,7 +1162,9 @@ export default function Settings() {
                     </div>
                     <Switch
                       checked={settings.Agent}
-                      onChange={(checked) => handleChange("Agent", checked)}
+                      onChange={(checked) => {
+                        void handleChange("Agent", checked);
+                      }}
                     />
                   </div>
                 </Field>
@@ -714,7 +1183,9 @@ export default function Settings() {
                     </div>
                     <Switch
                       checked={settings.Tools}
-                      onChange={(checked) => handleChange("Tools", checked)}
+                      onChange={(checked) => {
+                        void handleChange("Tools", checked);
+                      }}
                     />
                   </div>
                 </Field>

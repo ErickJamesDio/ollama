@@ -890,14 +890,24 @@ function OtherRoleMessage({
   lastToolQuery?: string;
 }) {
   const messageRef = useRef<HTMLDivElement>(null);
+  const isContextCompaction =
+    message.role === "system" &&
+    message.content?.startsWith("Context checkpoint:");
 
   return (
     <div
       className={`flex mb-8 flex-col transition-opacity duration-300 space-y-4 ${isFaded ? "opacity-50" : "opacity-100"}`}
     >
       <div className="flex-1 flex flex-col justify-start relative group max-w-none text-wrap break-words">
+        {isContextCompaction && (
+          <div className="mb-2 inline-flex max-w-fit items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-700 dark:text-amber-200">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+            <span>{message.content.replace("Context checkpoint:", "").trim()}</span>
+          </div>
+        )}
+
         {/* Thinking area */}
-        {message.thinking && (
+        {!isContextCompaction && message.thinking && (
           <Thinking
             thinking={message.thinking}
             startTime={message.thinkingTimeStart}
@@ -918,8 +928,12 @@ function OtherRoleMessage({
 
           if (
             message.role !== "tool" &&
+            !isContextCompaction &&
             (!message.content || !message.content.trim())
           ) {
+            return null;
+          }
+          if (isContextCompaction) {
             return null;
           }
 

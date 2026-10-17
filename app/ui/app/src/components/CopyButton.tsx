@@ -1,6 +1,7 @@
 import { CheckIcon } from "@heroicons/react/20/solid";
 import { Square2StackIcon } from "@heroicons/react/24/outline";
 import React, { useState } from "react";
+import { Tooltip } from "@/components/ui/tooltip";
 
 interface CopyButtonProps {
   content: string;
@@ -78,21 +79,18 @@ const CopyButton: React.FC<CopyButtonProps> = ({
   );
 
   return (
-    <button
-      type="button"
-      className={baseClasses}
-      onClick={handleCopy}
-      title={title}
-    >
-      {showLabels ? (
-        <span className="flex items-center gap-1">
-          {icon}
-          {isCopied ? "Copied" : "Copy"}
-        </span>
-      ) : (
-        icon
-      )}
-    </button>
+    <Tooltip content={title || undefined}>
+      <button type="button" className={baseClasses} onClick={handleCopy}>
+        {showLabels ? (
+          <span className="flex items-center gap-1">
+            {icon}
+            {isCopied ? "Copied" : "Copy"}
+          </span>
+        ) : (
+          icon
+        )}
+      </button>
+    </Tooltip>
   );
 };
 

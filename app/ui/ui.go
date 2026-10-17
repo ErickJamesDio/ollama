@@ -4,7 +4,9 @@
 package ui
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/app/mcp"
 	"github.com/ollama/ollama/app/server"
 	"github.com/ollama/ollama/app/store"
 	"github.com/ollama/ollama/app/tools"
@@ -34,6 +38,8 @@ import (
 	ollamaAuth "github.com/ollama/ollama/auth"
 	"github.com/ollama/ollama/cmd/launch"
 	"github.com/ollama/ollama/envconfig"
+	"github.com/ollama/ollama/format"
+	"github.com/ollama/ollama/fs/ggml"
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/types/model"
 	_ "github.com/tkrajina/typescriptify-golang-structs/typescriptify"
@@ -102,6 +108,7 @@ type Server struct {
 	Restart      func()
 	Token        string
 	Store        *store.Store
+	MCPManager   *mcp.Manager
 	ToolRegistry *tools.Registry
 	Tools        bool   // if true, the server will use single-turn tools to fulfill the user's request
 	WebSearch    bool   // if true, the server will use single-turn browser tool to fulfill the user's request
@@ -292,6 +299,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/inference-compute", handle(s.getInferenceCompute))
 	mux.Handle("POST /api/v1/model/upstream", handle(s.modelUpstream))
+	mux.Handle("GET /api/v1/models/manage", handle(s.listManagedModels))
+	mux.Handle("POST /api/v1/models/link", handle(s.linkModelFiles))
+	mux.Handle("POST /api/v1/models/import", handle(s.importModelFiles))
+	mux.Handle("POST /api/v1/models/alias", handle(s.setModelAlias))
+	mux.Handle("POST /api/v1/models/unlink", handle(s.unlinkModel))
+	mux.Handle("POST /api/v1/models/delete", handle(s.deleteManagedModel))
 	mux.Handle("GET /api/v1/settings", handle(s.getSettings))
 	mux.Handle("POST /api/v1/settings", handle(s.settings))
 	mux.Handle("GET /api/v1/cloud", handle(s.getCloudSetting))
@@ -301,11 +314,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/plugins", handle(s.listPlugins))
 	mux.Handle("POST /api/v1/plugins/import", handle(s.importPlugins))
 	mux.Handle("PUT /api/v1/plugins/{id}", handle(s.updatePlugin))
+	mux.Handle("PUT /api/v1/plugins/{id}/tools/{toolName}", handle(s.updatePluginTool))
 	mux.Handle("DELETE /api/v1/plugins/{id}", handle(s.deletePlugin))
 
 	// Ollama proxy endpoints
 	ollamaProxy := s.ollamaProxy()
 	mux.Handle("GET /api/tags", ollamaProxy)
+	mux.Handle("GET /api/ps", ollamaProxy)
 	mux.Handle("POST /api/show", ollamaProxy)
 	mux.Handle("GET /api/version", ollamaProxy)
 	mux.Handle("GET /api/status", ollamaProxy)
@@ -732,6 +747,14 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 	if req.Model == "" {
 		return fmt.Errorf("empty model")
 	}
+	traceID := strings.TrimSpace(req.TraceID)
+	if traceID == "" {
+		if id, err := uuid.NewV7(); err == nil {
+			traceID = id.String()
+		} else {
+			traceID = fmt.Sprintf("chat-trace-%d", time.Now().UnixNano())
+		}
+	}
 
 	// Don't allow empty messages unless forceUpdate is true
 	if req.Prompt == "" && !req.ForceUpdate {
@@ -761,6 +784,15 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 		}
 		chat = store.NewChat(cid)
 	}
+	s.log().Info("chat context trace: send received",
+		"trace_id", traceID,
+		"chat_id", cid,
+		"model", req.Model,
+		"force_update", req.ForceUpdate,
+		"ux_estimated_context_tokens", req.UXEstimatedContextTokens,
+		"canonical_turns_before_append", len(chat.Messages),
+		"attachments", len(req.Attachments),
+	)
 
 	// Only add user message if not forceUpdate
 	if !req.ForceUpdate {
@@ -815,6 +847,23 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
+	settingsForTrace, settingsErr := s.Store.Settings()
+	if settingsErr != nil {
+		s.log().Warn("chat context trace: settings unavailable", "trace_id", traceID, "chat_id", cid, "error", settingsErr)
+	}
+	configuredContextLength := 0
+	if settingsErr == nil {
+		configuredContextLength = settingsForTrace.ContextLength
+	}
+	canonicalEstimate := estimateMessagesTokens(chat.Messages)
+	s.log().Info("chat context trace: canonical prepared",
+		"trace_id", traceID,
+		"chat_id", cid,
+		"context_length", configuredContextLength,
+		"ux_estimated_context_tokens", req.UXEstimatedContextTokens,
+		"canonical_turns", len(chat.Messages),
+		"canonical_estimated_tokens", canonicalEstimate,
+	)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -925,15 +974,18 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	// Check if agent or tools mode is enabled
-	// Note: Skip agent/tools mode if user has attachments, as the agent doesn't handle file attachments properly
-	registry := tools.NewRegistry()
+	hasToolsCapability := slices.Contains(details.Capabilities, model.CapabilityTools)
+
+	// Check if agent or tools mode is enabled.
+	// Persistent plugin tools remain available to the host, but are only
+	// granted to this Send when the caller explicitly enables file_tools.
+	fileToolsEnabled := req.FileTools != nil && *req.FileTools
+	registry := requestToolRegistry(s.ToolRegistry, hasToolsCapability, fileToolsEnabled)
 	var browser *tools.Browser
 	ctx = tools.WithAllowedDirectURLs(ctx, userMessageText(chat.Messages))
 
 	if !hasAttachments {
 		WebSearchEnabled := req.WebSearch != nil && *req.WebSearch
-		hasToolsCapability := slices.Contains(details.Capabilities, model.CapabilityTools)
 
 		if WebSearchEnabled && hasToolsCapability {
 			if supportsBrowserTools(req.Model) {
@@ -950,6 +1002,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 				registry.Register(&tools.WebFetch{})
 			}
 		}
+	}
+	if hasToolsCapability {
+		registerToolResultRecovery(registry, chat, configuredContextLength)
 	}
 
 	var thinkingTimeStart *time.Time = nil
@@ -991,12 +1046,104 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 				reqChat = &temp
 			}
 		}
+		compactionTrace := &contextCompactionTrace{}
+		if shouldShowContextCompactionProgress(s, reqChat) {
+			s.logContextCompactionTrigger(traceID, cid, passNum, req.UXEstimatedContextTokens, reqChat)
+			if err := json.NewEncoder(w).Encode(responses.ChatEvent{
+				EventName: "context_compaction",
+				Content:   ptr("Compacting prior context into a checkpoint before continuing..."),
+			}); err != nil {
+				return err
+			}
+			flusher.Flush()
+		}
+		requestOverheadTokens := estimateToolDefinitionsTokens(availableTools)
+		reqChat, err = s.operationalChatForRequestWithTraceAndOverhead(ctx, c, reqChat, req.Model, requestOverheadTokens, compactionTrace)
+		if err != nil {
+			s.log().Warn("chat context trace: compaction failed",
+				"trace_id", traceID,
+				"chat_id", cid,
+				"pass", passNum,
+				"context_length", compactionTrace.Limit,
+				"canonical_turns", compactionTrace.CanonicalTurns,
+				"canonical_estimated_tokens", compactionTrace.CanonicalEstimate,
+				"triggered", compactionTrace.Triggered,
+				"coverage", compactionTrace.Coverage,
+				"error", err,
+			)
+			return err
+		}
+		s.log().Info("chat context trace: compaction observed",
+			"trace_id", traceID,
+			"chat_id", cid,
+			"pass", passNum,
+			"context_length", compactionTrace.Limit,
+			"canonical_turns", compactionTrace.CanonicalTurns,
+			"canonical_estimated_tokens", compactionTrace.CanonicalEstimate,
+			"checkpoint_covered_turns", compactionTrace.CheckpointCoveredTurns,
+			"projected_turns", compactionTrace.ProjectedTurns,
+			"projected_estimated_tokens", compactionTrace.ProjectedEstimate,
+			"triggered", compactionTrace.Triggered,
+			"coverage", compactionTrace.Coverage,
+			"delta_turns", compactionTrace.DeltaTurns,
+			"before_tokens", compactionTrace.BeforeTokens,
+			"after_tokens", compactionTrace.AfterTokens,
+			"summary_tokens", compactionTrace.SummaryTokens,
+			"summary_bytes", compactionTrace.SummaryBytes,
+			"output_turns", compactionTrace.OutputTurns,
+			"output_estimated_tokens", compactionTrace.OutputEstimate,
+			"fallback", compactionTrace.Fallback,
+			"error", compactionTrace.Error,
+		)
+		if compactionTrace.Triggered || compactionTrace.Fallback == "checkpoint_projection" {
+			status := "Context checkpoint ready. Continuing with checkpoint + recent turns..."
+			if compactionTrace.Fallback == "checkpoint_projection" {
+				status = "Using existing context checkpoint + recent turns..."
+			}
+			if err := json.NewEncoder(w).Encode(responses.ChatEvent{
+				EventName: "context_compaction",
+				Content:   ptr(status),
+			}); err != nil {
+				return err
+			}
+			flusher.Flush()
+		}
 		chatReq, err := s.buildChatRequest(reqChat, req.Model, thinkValue, availableTools)
 		if err != nil {
 			return err
 		}
+		chatReq.TraceID = traceID
+		chatReq.UXEstimatedContextTokens = req.UXEstimatedContextTokens
+		finalRequestEstimate := estimateAPIChatRequestTokens(chatReq)
+		finalRequestBudget := contextFinalRequestBudget(configuredContextLength)
+		if configuredContextLength > 0 && finalRequestEstimate > finalRequestBudget {
+			return fmt.Errorf("final chat request estimate %d exceeds input budget %d for configured context %d", finalRequestEstimate, finalRequestBudget, configuredContextLength)
+		}
+		s.log().Info("chat context trace: runtime request built",
+			"trace_id", traceID,
+			"chat_id", cid,
+			"pass", passNum,
+			"request_messages", len(chatReq.Messages),
+			"request_tools", len(chatReq.Tools),
+			"request_images", countAPIMessageImages(chatReq.Messages),
+			"request_estimated_tokens", finalRequestEstimate,
+			"request_input_budget", finalRequestBudget,
+			"think", chatReq.Think != nil,
+		)
 
 		err = c.Chat(ctx, chatReq, func(res api.ChatResponse) error {
+			if res.Done {
+				s.log().Info("chat context trace: runtime response done",
+					"trace_id", traceID,
+					"chat_id", cid,
+					"pass", passNum,
+					"prompt_eval_count", res.PromptEvalCount,
+					"eval_count", res.EvalCount,
+					"finish_reason", res.DoneReason,
+					"total_duration_ms", res.TotalDuration.Milliseconds(),
+					"load_duration_ms", res.LoadDuration.Milliseconds(),
+				)
+			}
 			if loading {
 				// Remove the loading indicator on first token
 				cancelLoading()
@@ -1108,28 +1255,47 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 					result, content, err := registry.Execute(ctx, toolCall.Function.Name, toolCall.Function.Arguments.ToMap())
 					if err != nil {
 						errContent := fmt.Sprintf("Error: %v", err)
-						toolErrMsg := store.NewMessage("tool", errContent, nil)
+						modelContent := content
+						if modelContent == "" {
+							modelContent = errContent
+						} else {
+							modelContent = errContent + "\n" + modelContent
+						}
+						var tr json.RawMessage
+						if result != nil {
+							resultJSON, marshalErr := json.Marshal(result)
+							if marshalErr != nil {
+								return fmt.Errorf("failed to marshal failed tool result: %w", marshalErr)
+							}
+							tr = resultJSON
+						}
+						var toolErrOptions *store.MessageOptions
+						if len(tr) > 0 {
+							toolErrOptions = &store.MessageOptions{ToolResult: &tr}
+						}
+						toolErrMsg := store.NewMessage("tool", modelContent, toolErrOptions)
 						toolErrMsg.ToolName = toolCall.Function.Name
 						chat.Messages = append(chat.Messages, toolErrMsg)
 						if err := s.Store.AppendMessage(chat.ID, toolErrMsg); err != nil {
 							return err
 						}
+						registerToolResultRecovery(registry, chat, configuredContextLength)
 
 						// Emit tool error event
 						toolResult := true
 						json.NewEncoder(w).Encode(responses.ChatEvent{
 							EventName: "tool",
-							Content:   &errContent,
+							Content:   &modelContent,
 							ToolName:  &toolCall.Function.Name,
 						})
 						flusher.Flush()
 
 						json.NewEncoder(w).Encode(responses.ChatEvent{
 							EventName:      "tool_result",
-							Content:        &errContent,
+							Content:        &modelContent,
 							ToolName:       &toolCall.Function.Name,
 							ToolResult:     &toolResult,
-							ToolResultData: nil, // No result data for errors
+							ToolResultData: result,
 						})
 						flusher.Flush()
 						continue
@@ -1174,7 +1340,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 					toolMsg.ToolName = toolCall.Function.Name
 					chat.Messages = append(chat.Messages, toolMsg)
 
-					s.Store.AppendMessage(chat.ID, toolMsg)
+					if err := s.Store.AppendMessage(chat.ID, toolMsg); err != nil {
+						return err
+					}
+					registerToolResultRecovery(registry, chat, configuredContextLength)
 
 					// Emit tool message event (matching agent pattern)
 					toolResult := true
@@ -1293,7 +1462,6 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 		if !toolsExecuted {
 			break
 		}
-
 		passNum++
 	}
 
@@ -1370,8 +1538,22 @@ func (s *Server) getChat(w http.ResponseWriter, r *http.Request) error {
 			chat.BrowserState = json.RawMessage(cleanedState)
 		}
 	}
+	checkpoint, err := s.Store.ContextCheckpoint(chat.ID, chat.Messages)
+	if err != nil {
+		s.log().Warn("context checkpoint unavailable for chat response", "chat_id", chat.ID, "error", err)
+	}
+	var checkpointInfo *responses.ContextCheckpointInfo
+	if checkpoint != nil {
+		checkpointInfo = &responses.ContextCheckpointInfo{
+			CoveredMessageCount:   checkpoint.CoveredMessageCount,
+			EstimatedTokensBefore: checkpoint.EstimatedTokensBefore,
+			EstimatedTokensAfter:  checkpoint.EstimatedTokensAfter,
+			CreatedAt:             checkpoint.CreatedAt,
+		}
+	}
 	data := responses.ChatResponse{
-		Chat: *chat,
+		Chat:              *chat,
+		ContextCheckpoint: checkpointInfo,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1514,6 +1696,90 @@ func chatInfoFromChat(chat store.Chat) responses.ChatInfo {
 	}
 }
 
+func shouldShowContextCompactionProgress(s *Server, chat *store.Chat) bool {
+	settings, err := s.Store.Settings()
+	if err != nil || settings.ContextLength <= 0 {
+		return false
+	}
+
+	trigger := int(float64(settings.ContextLength) * contextCompactionTriggerRatio)
+	if trigger <= 0 || estimateMessagesTokens(chat.Messages) < trigger {
+		return false
+	}
+
+	checkpoint, err := s.Store.ContextCheckpoint(chat.ID, chat.Messages)
+	if err != nil {
+		return false
+	}
+	if checkpoint != nil {
+		projected := projectChatForRequest(chat, checkpoint, trigger)
+		if estimateMessagesTokens(projected.Messages) < trigger {
+			return false
+		}
+	}
+
+	coverage := chooseContextCoverage(chat.Messages, int(float64(settings.ContextLength)*contextCompactionTargetRatio))
+	if coverage <= 0 {
+		return false
+	}
+	return checkpoint == nil || coverage > checkpoint.CoveredMessageCount
+}
+
+func (s *Server) logContextCompactionTrigger(traceID, chatID string, pass, uxActiveTokens int, chat *store.Chat) {
+	settings, err := s.Store.Settings()
+	if err != nil || settings.ContextLength <= 0 {
+		return
+	}
+
+	canonicalEstimate := estimateMessagesTokens(chat.Messages)
+	activeEstimate := canonicalEstimate
+	checkpointCoveredTurns := 0
+	checkpoint, checkpointErr := s.Store.ContextCheckpoint(chat.ID, chat.Messages)
+	if checkpointErr == nil && checkpoint != nil {
+		checkpointCoveredTurns = checkpoint.CoveredMessageCount
+		activeEstimate = estimateMessagesTokens(projectChatForRequest(chat, checkpoint, int(float64(settings.ContextLength)*contextCompactionTriggerRatio)).Messages)
+	}
+
+	imageTokens, imageBytes, imageCount := estimateImageAttachmentTokens(chat.Messages)
+	latestImageTokens, latestImageBytes, latestImageCount := 0, 0, 0
+	if len(chat.Messages) > 0 {
+		latestImageTokens, latestImageBytes, latestImageCount = estimateImageAttachmentTokens(chat.Messages[len(chat.Messages)-1:])
+	}
+
+	s.log().Info("chat context trace: compaction progress triggered",
+		"trace_id", traceID,
+		"chat_id", chatID,
+		"pass", pass,
+		"context_length", settings.ContextLength,
+		"threshold_tokens", int(float64(settings.ContextLength)*contextCompactionTriggerRatio),
+		"active_context_tokens", activeEstimate,
+		"ux_active_context_tokens", uxActiveTokens,
+		"canonical_estimated_tokens", canonicalEstimate,
+		"image_estimated_tokens", imageTokens,
+		"image_bytes", imageBytes,
+		"image_count", imageCount,
+		"latest_turn_image_estimated_tokens", latestImageTokens,
+		"latest_turn_image_bytes", latestImageBytes,
+		"latest_turn_image_count", latestImageCount,
+		"checkpoint_covered_turns", checkpointCoveredTurns,
+		"checkpoint_error", checkpointErr,
+	)
+}
+
+func estimateImageAttachmentTokens(messages []store.Message) (tokens, bytes, count int) {
+	for _, msg := range messages {
+		for _, attachment := range msg.Attachments {
+			if !isImageAttachment(attachment.Filename) {
+				continue
+			}
+			tokens += estimateTokens(attachment.Filename) + api.ImageTokenEstimate
+			bytes += len(attachment.Data)
+			count++
+		}
+	}
+	return tokens, bytes, count
+}
+
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) error {
 	settings, err := s.Store.Settings()
 	if err != nil {
@@ -1527,7 +1793,6 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) error {
 
 	// Include current runtime settings
 	settings.Agent = s.Agent
-	settings.Tools = s.Tools
 	settings.WorkingDir = s.WorkingDir
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1569,6 +1834,21 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 	if _, ok := rawFields["LocalModelsEnabled"]; !ok {
 		settings.LocalModelsEnabled = old.LocalModelsEnabled
 	}
+	if _, ok := rawFields["CPUFallbackEnabled"]; !ok {
+		settings.CPUFallbackEnabled = old.CPUFallbackEnabled
+	}
+	if _, ok := rawFields["InferenceEnabled"]; !ok {
+		settings.InferenceEnabled = old.InferenceEnabled
+	}
+	if _, ok := rawFields["InferenceRuntime"]; !ok {
+		settings.InferenceRuntime = old.InferenceRuntime
+	}
+	if _, ok := rawFields["InferenceAutoFitEnabled"]; !ok {
+		settings.InferenceAutoFitEnabled = old.InferenceAutoFitEnabled
+	}
+	if _, ok := rawFields["InferenceManualLayers"]; !ok {
+		settings.InferenceManualLayers = old.InferenceManualLayers
+	}
 
 	if err := s.Store.SetSettings(settings); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
@@ -1594,7 +1874,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 
 	if old.ContextLength != settings.ContextLength ||
 		old.Models != settings.Models ||
-		old.Expose != settings.Expose {
+		old.Expose != settings.Expose ||
+		old.InferenceRuntime != settings.InferenceRuntime ||
+		old.InferenceAutoFitEnabled != settings.InferenceAutoFitEnabled ||
+		old.InferenceManualLayers != settings.InferenceManualLayers {
 		s.Restart()
 	}
 
@@ -1602,6 +1885,533 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 	return json.NewEncoder(w).Encode(responses.SettingsResponse{
 		Settings: settings,
 	})
+}
+
+type managedModelsResponse struct {
+	Models []managedModel `json:"models"`
+}
+
+type managedModel struct {
+	Name        string           `json:"name"`
+	Size        int64            `json:"size"`
+	Digest      string           `json:"digest"`
+	ModifiedAt  time.Time        `json:"modified_at"`
+	Details     api.ModelDetails `json:"details,omitempty"`
+	Origin      string           `json:"origin"`
+	SourcePath  string           `json:"sourcePath,omitempty"`
+	DisplayName string           `json:"displayName,omitempty"`
+	CanRename   bool             `json:"canRename"`
+	CanUnlink   bool             `json:"canUnlink"`
+	CanDelete   bool             `json:"canDelete"`
+	CanUpdate   bool             `json:"canUpdate"`
+}
+
+func (s *Server) listManagedModels(w http.ResponseWriter, r *http.Request) error {
+	list, err := s.inferenceClient().List(r.Context())
+	if err != nil {
+		return fmt.Errorf("list models: %w", err)
+	}
+
+	metadataItems, err := s.Store.ModelMetadata()
+	if err != nil {
+		return fmt.Errorf("load model metadata: %w", err)
+	}
+	metadataByName := make(map[string]store.ModelMetadata, len(metadataItems))
+	for _, item := range metadataItems {
+		metadataByName[item.ModelName] = item
+	}
+
+	models := make([]managedModel, 0, len(list.Models))
+	for _, item := range list.Models {
+		if item.Digest == "" {
+			continue
+		}
+		meta := metadataByName[item.Model]
+		origin := meta.Origin
+		if origin == "" {
+			origin = "ollama_storage"
+		}
+		isLinked := origin == "linked_gguf"
+		models = append(models, managedModel{
+			Name:        item.Model,
+			Size:        item.Size,
+			Digest:      item.Digest,
+			ModifiedAt:  item.ModifiedAt,
+			Details:     item.Details,
+			Origin:      origin,
+			SourcePath:  meta.SourcePath,
+			DisplayName: meta.DisplayName,
+			CanRename:   true,
+			CanUnlink:   isLinked,
+			CanDelete:   !isLinked,
+			CanUpdate:   !isLinked && item.RemoteHost != "",
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(managedModelsResponse{Models: models})
+}
+
+func (s *Server) importModelFiles(w http.ResponseWriter, r *http.Request) error {
+	return s.linkModelFiles(w, r)
+}
+
+func (s *Server) linkModelFiles(w http.ResponseWriter, r *http.Request) error {
+	var req struct {
+		Name  string   `json:"name"`
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return fmt.Errorf("model name is required")
+	}
+	if parsed := model.ParseName(name); !parsed.IsValid() {
+		return fmt.Errorf("invalid model name")
+	}
+	if len(req.Paths) == 0 {
+		return fmt.Errorf("at least one GGUF file is required")
+	}
+
+	parsedName := model.ParseName(name)
+	modelName := parsedName.DisplayShortest()
+	s.log().Info("linking GGUF model", "model", modelName, "file_count", len(req.Paths))
+
+	settings, err := s.Store.Settings()
+	if err != nil {
+		return fmt.Errorf("load model location: %w", err)
+	}
+	modelRoot := settings.Models
+	if modelRoot == "" {
+		modelRoot = envconfig.Models()
+	}
+
+	type linkedModelFile struct {
+		path    string
+		digest  string
+		layer   manifest.Layer
+		decoded *ggml.GGML
+	}
+
+	var baseFile *linkedModelFile
+	projectorFiles := make([]linkedModelFile, 0, len(req.Paths)-1)
+	var sourcePath string
+	var modelFile *ggml.GGML
+	for _, p := range req.Paths {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("model file path is required")
+		}
+
+		realPath, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return fmt.Errorf("resolve model file %q: %w", filepath.Base(p), err)
+		}
+		info, err := os.Stat(realPath)
+		if err != nil {
+			return fmt.Errorf("read model file %q: %w", filepath.Base(p), err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("model file %q is a directory", filepath.Base(p))
+		}
+		if !strings.EqualFold(filepath.Ext(realPath), ".gguf") {
+			return fmt.Errorf("model file %q must be a .gguf file", filepath.Base(p))
+		}
+
+		digest, err := digestForImportFile(realPath)
+		if err != nil {
+			return fmt.Errorf("hash model file %q: %w", filepath.Base(p), err)
+		}
+
+		layer, decoded, err := linkGGUFBlob(modelRoot, realPath, digest)
+		if err != nil {
+			return fmt.Errorf("link model file %q: %w", filepath.Base(p), err)
+		}
+
+		linked := linkedModelFile{path: realPath, digest: digest, layer: layer, decoded: decoded}
+		if isGGUFProjector(decoded) {
+			layer.MediaType = "application/vnd.ollama.image.projector"
+			linked.layer = layer
+			projectorFiles = append(projectorFiles, linked)
+			continue
+		}
+		if baseFile != nil {
+			return fmt.Errorf("multiple base GGUF model files selected: %q and %q", filepath.Base(baseFile.path), filepath.Base(realPath))
+		}
+		baseFile = &linked
+	}
+
+	if baseFile == nil {
+		return fmt.Errorf("base GGUF model file is required; selected files only include projector/mmproj files")
+	}
+	sourcePath = baseFile.path
+	modelFile = baseFile.decoded
+	layers := make([]manifest.Layer, 0, 1+len(projectorFiles))
+	layers = append(layers, baseFile.layer)
+	for _, projector := range projectorFiles {
+		layers = append(layers, projector.layer)
+	}
+
+	configLayer, err := linkedGGUFConfigLayer(modelRoot, modelFile)
+	if err != nil {
+		return fmt.Errorf("create linked model config: %w", err)
+	}
+
+	if err := writeLinkedManifest(modelRoot, parsedName, *configLayer, layers); err != nil {
+		return fmt.Errorf("write linked model manifest: %w", err)
+	}
+
+	if err := s.Store.UpsertModelMetadata(store.ModelMetadata{
+		ModelName:  modelName,
+		Origin:     "linked_gguf",
+		SourcePath: sourcePath,
+	}); err != nil {
+		return fmt.Errorf("save linked model metadata: %w", err)
+	}
+
+	s.log().Info("linked GGUF model", "model", modelName, "file_count", len(layers))
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{
+		"model": modelName,
+	})
+}
+
+func linkGGUFBlob(modelRoot, path, digest string) (manifest.Layer, *ggml.GGML, error) {
+	blobPath, err := linkedBlobPath(modelRoot, digest)
+	if err != nil {
+		return manifest.Layer{}, nil, err
+	}
+
+	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(blobPath), 0o755); err != nil {
+			return manifest.Layer{}, nil, err
+		}
+		if err := os.Link(path, blobPath); err != nil {
+			return manifest.Layer{}, nil, fmt.Errorf("create hardlink: %w", err)
+		}
+		if err := os.Chmod(blobPath, 0o644); err != nil {
+			return manifest.Layer{}, nil, err
+		}
+	} else if err != nil {
+		return manifest.Layer{}, nil, err
+	}
+
+	fi, err := os.Stat(blobPath)
+	if err != nil {
+		return manifest.Layer{}, nil, err
+	}
+
+	f, err := os.Open(blobPath)
+	if err != nil {
+		return manifest.Layer{}, nil, err
+	}
+	defer f.Close()
+	decoded, err := ggml.Decode(f, -1)
+	if err != nil {
+		return manifest.Layer{}, nil, err
+	}
+
+	return manifest.Layer{
+		MediaType: "application/vnd.ollama.image.model",
+		Digest:    digest,
+		Size:      fi.Size(),
+		Status:    fmt.Sprintf("using existing layer %s", digest),
+	}, decoded, nil
+}
+
+func isGGUFProjector(f *ggml.GGML) bool {
+	kv := f.KV()
+	kind := strings.ToLower(kv.Kind())
+	arch := strings.ToLower(kv.Architecture())
+	if kind == "projector" || kind == "mmproj" {
+		return true
+	}
+	return arch == "clip"
+}
+
+func linkedBlobPath(modelRoot, digest string) (string, error) {
+	if digest == "" {
+		path := filepath.Join(modelRoot, "blobs")
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return "", fmt.Errorf("%w: ensure path elements are traversable", err)
+		}
+		return path, nil
+	}
+	if !strings.HasPrefix(digest, "sha256:") || len(digest) != len("sha256:")+64 {
+		return "", manifest.ErrInvalidDigestFormat
+	}
+	path := filepath.Join(modelRoot, "blobs", strings.ReplaceAll(digest, ":", "-"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("%w: ensure path elements are traversable", err)
+	}
+	return path, nil
+}
+
+func linkedGGUFConfigLayer(modelRoot string, f *ggml.GGML) (*manifest.Layer, error) {
+	kv := f.KV()
+	config := model.ConfigV2{
+		ModelFormat:   f.Name(),
+		ModelFamily:   kv.Architecture(),
+		ModelFamilies: []string{kv.Architecture()},
+		ModelType:     format.HumanNumber(kv.ParameterCount()),
+		FileType:      kv.FileType().String(),
+		Capabilities:  []string{string(model.CapabilityCompletion)},
+		ContextLen:    int(kv.ContextLength()),
+		EmbedLen:      int(kv.EmbeddingLength()),
+		Architecture:  runtime.GOARCH,
+		OS:            runtime.GOOS,
+	}
+
+	var b bytes.Buffer
+	if err := json.NewEncoder(&b).Encode(config); err != nil {
+		return nil, err
+	}
+
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(b.Bytes()))
+	blobPath, err := linkedBlobPath(modelRoot, digest)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(blobPath); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(blobPath, b.Bytes(), 0o644); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+
+	layer := manifest.Layer{
+		MediaType: "application/vnd.docker.container.image.v1+json",
+		Digest:    digest,
+		Size:      int64(b.Len()),
+		Status:    fmt.Sprintf("using existing layer %s", digest),
+	}
+	return &layer, nil
+}
+
+func writeLinkedManifest(modelRoot string, name model.Name, config manifest.Layer, layers []manifest.Layer) error {
+	if !name.IsValid() {
+		return os.ErrNotExist
+	}
+
+	p := filepath.Join(modelRoot, "manifests", name.Filepath())
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+
+	f, err := os.Create(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	m := manifest.Manifest{
+		SchemaVersion: 2,
+		MediaType:     "application/vnd.docker.distribution.manifest.v2+json",
+		Config:        config,
+		Layers:        layers,
+	}
+
+	return json.NewEncoder(f).Encode(m)
+}
+
+func digestForImportFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
+}
+
+func (s *Server) setModelAlias(w http.ResponseWriter, r *http.Request) error {
+	var req struct {
+		Model       string `json:"model"`
+		DisplayName string `json:"displayName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+
+	modelName := strings.TrimSpace(req.Model)
+	if modelName == "" {
+		return fmt.Errorf("model is required")
+	}
+	displayName := strings.TrimSpace(req.DisplayName)
+	if err := s.Store.SetModelDisplayName(modelName, displayName); err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func (s *Server) unlinkModel(w http.ResponseWriter, r *http.Request) error {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+
+	modelName := strings.TrimSpace(req.Model)
+	if modelName == "" {
+		return fmt.Errorf("model is required")
+	}
+
+	metadata, err := s.Store.ModelMetadata()
+	if err != nil {
+		return err
+	}
+	var found store.ModelMetadata
+	for _, item := range metadata {
+		if item.ModelName == modelName {
+			found = item
+			break
+		}
+	}
+	if found.Origin != "linked_gguf" {
+		return fmt.Errorf("model is not a linked GGUF")
+	}
+
+	settings, err := s.Store.Settings()
+	if err != nil {
+		return fmt.Errorf("load model location: %w", err)
+	}
+	modelRoot := settings.Models
+	if modelRoot == "" {
+		modelRoot = envconfig.Models()
+	}
+
+	n := model.ParseName(modelName)
+	if err := removeLinkedModel(modelRoot, n); err != nil {
+		return err
+	}
+	if err := s.Store.DeleteModelMetadata(modelName); err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func removeLinkedModel(modelRoot string, name model.Name) error {
+	manifestPath := filepath.Join(modelRoot, "manifests", name.Filepath())
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("load linked manifest: %w", err)
+	}
+
+	var m manifest.Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("parse linked manifest: %w", err)
+	}
+
+	if err := os.Remove(manifestPath); err != nil {
+		return fmt.Errorf("remove linked manifest: %w", err)
+	}
+	if err := manifest.PruneDirectory(filepath.Join(modelRoot, "manifests")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("prune linked manifests: %w", err)
+	}
+
+	inUse, err := linkedManifestDigests(modelRoot)
+	if err != nil {
+		return fmt.Errorf("read linked manifests: %w", err)
+	}
+	for _, layer := range append(m.Layers, m.Config) {
+		if layer.Digest == "" {
+			continue
+		}
+		if _, ok := inUse[layer.Digest]; ok {
+			continue
+		}
+		blobPath, err := linkedBlobPath(modelRoot, layer.Digest)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(blobPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove linked blob %s: %w", layer.Digest, err)
+		}
+	}
+
+	return nil
+}
+
+func linkedManifestDigests(modelRoot string) (map[string]struct{}, error) {
+	manifestsRoot := filepath.Join(modelRoot, "manifests")
+	matches, err := filepath.Glob(filepath.Join(manifestsRoot, "*", "*", "*", "*"))
+	if err != nil {
+		return nil, err
+	}
+
+	inUse := map[string]struct{}{}
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(match)
+		if err != nil {
+			return nil, err
+		}
+		var m manifest.Manifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, err
+		}
+		for _, layer := range append(m.Layers, m.Config) {
+			if layer.Digest != "" {
+				inUse[layer.Digest] = struct{}{}
+			}
+		}
+	}
+
+	return inUse, nil
+}
+
+func (s *Server) deleteManagedModel(w http.ResponseWriter, r *http.Request) error {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+
+	modelName := strings.TrimSpace(req.Model)
+	if modelName == "" {
+		return fmt.Errorf("model is required")
+	}
+
+	metadata, err := s.Store.ModelMetadata()
+	if err != nil {
+		return err
+	}
+	for _, item := range metadata {
+		if item.ModelName == modelName && item.Origin == "linked_gguf" {
+			return fmt.Errorf("linked GGUF models must be unlinked, not deleted")
+		}
+	}
+
+	if err := s.inferenceClient().Delete(r.Context(), &api.DeleteRequest{Model: modelName}); err != nil {
+		return fmt.Errorf("delete model: %w", err)
+	}
+	if err := s.Store.DeleteModelMetadata(modelName); err != nil {
+		return err
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 func (s *Server) cloudSetting(w http.ResponseWriter, r *http.Request) error {
@@ -1702,12 +2512,13 @@ func (s *Server) getInferenceCompute(w http.ResponseWriter, r *http.Request) err
 	inferenceComputes := make([]responses.InferenceCompute, len(info.Computes))
 	for i, ic := range info.Computes {
 		inferenceComputes[i] = responses.InferenceCompute{
-			Library: ic.Library,
-			Variant: ic.Variant,
-			Compute: ic.Compute,
-			Driver:  ic.Driver,
-			Name:    ic.Name,
-			VRAM:    ic.VRAM,
+			Library:     ic.Library,
+			Variant:     ic.Variant,
+			Compute:     ic.Compute,
+			Driver:      ic.Driver,
+			Name:        ic.Name,
+			Description: ic.Description,
+			VRAM:        ic.VRAM,
 		}
 	}
 
@@ -1855,6 +2666,22 @@ func supportsBrowserTools(model string) bool {
 	return strings.HasPrefix(strings.ToLower(model), "gpt-oss")
 }
 
+func (s *Server) chatToolRegistry() *tools.Registry {
+	if s.ToolRegistry != nil {
+		return s.ToolRegistry.Clone()
+	}
+
+	return tools.NewRegistry()
+}
+
+func requestToolRegistry(persistent *tools.Registry, hasToolsCapability, fileToolsEnabled bool) *tools.Registry {
+	if hasToolsCapability && fileToolsEnabled && persistent != nil {
+		return persistent.Clone()
+	}
+
+	return tools.NewRegistry()
+}
+
 // buildChatRequest converts store.Chat to api.ChatRequest
 func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, availableTools []map[string]any) (*api.ChatRequest, error) {
 	var msgs []api.Message
@@ -1949,4 +2776,12 @@ func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, ava
 	}
 
 	return req, nil
+}
+
+func countAPIMessageImages(messages []api.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += len(msg.Images)
+	}
+	return total
 }

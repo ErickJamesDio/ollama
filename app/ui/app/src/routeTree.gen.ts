@@ -14,6 +14,7 @@ import { Route as rootRoute } from './routes/__root'
 import { Route as SettingsImport } from './routes/settings'
 import { Route as PluginsImport } from './routes/plugins'
 import { Route as OnboardingImport } from './routes/onboarding'
+import { Route as InferenceImport } from './routes/inference'
 import { Route as ConnectImport } from './routes/connect'
 import { Route as IndexImport } from './routes/index'
 import { Route as CChatIdImport } from './routes/c.$chatId'
@@ -35,6 +36,12 @@ const PluginsRoute = PluginsImport.update({
 const OnboardingRoute = OnboardingImport.update({
   id: '/onboarding',
   path: '/onboarding',
+  getParentRoute: () => rootRoute,
+} as any)
+
+const InferenceRoute = InferenceImport.update({
+  id: '/inference',
+  path: '/inference',
   getParentRoute: () => rootRoute,
 } as any)
 
@@ -74,6 +81,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConnectImport
       parentRoute: typeof rootRoute
     }
+    '/inference': {
+      id: '/inference'
+      path: '/inference'
+      fullPath: '/inference'
+      preLoaderRoute: typeof InferenceImport
+      parentRoute: typeof rootRoute
+    }
     '/onboarding': {
       id: '/onboarding'
       path: '/onboarding'
@@ -110,6 +124,7 @@ declare module '@tanstack/react-router' {
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/connect': typeof ConnectRoute
+  '/inference': typeof InferenceRoute
   '/onboarding': typeof OnboardingRoute
   '/plugins': typeof PluginsRoute
   '/settings': typeof SettingsRoute
@@ -119,6 +134,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/connect': typeof ConnectRoute
+  '/inference': typeof InferenceRoute
   '/onboarding': typeof OnboardingRoute
   '/plugins': typeof PluginsRoute
   '/settings': typeof SettingsRoute
@@ -129,6 +145,7 @@ export interface FileRoutesById {
   __root__: typeof rootRoute
   '/': typeof IndexRoute
   '/connect': typeof ConnectRoute
+  '/inference': typeof InferenceRoute
   '/onboarding': typeof OnboardingRoute
   '/plugins': typeof PluginsRoute
   '/settings': typeof SettingsRoute
@@ -140,16 +157,25 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/connect'
+    | '/inference'
     | '/onboarding'
     | '/plugins'
     | '/settings'
     | '/c/$chatId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/connect' | '/onboarding' | '/plugins' | '/settings' | '/c/$chatId'
+  to:
+    | '/'
+    | '/connect'
+    | '/inference'
+    | '/onboarding'
+    | '/plugins'
+    | '/settings'
+    | '/c/$chatId'
   id:
     | '__root__'
     | '/'
     | '/connect'
+    | '/inference'
     | '/onboarding'
     | '/plugins'
     | '/settings'
@@ -160,6 +186,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ConnectRoute: typeof ConnectRoute
+  InferenceRoute: typeof InferenceRoute
   OnboardingRoute: typeof OnboardingRoute
   PluginsRoute: typeof PluginsRoute
   SettingsRoute: typeof SettingsRoute
@@ -169,6 +196,7 @@ export interface RootRouteChildren {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ConnectRoute: ConnectRoute,
+  InferenceRoute: InferenceRoute,
   OnboardingRoute: OnboardingRoute,
   PluginsRoute: PluginsRoute,
   SettingsRoute: SettingsRoute,
@@ -187,6 +215,7 @@ export const routeTree = rootRoute
       "children": [
         "/",
         "/connect",
+        "/inference",
         "/onboarding",
         "/plugins",
         "/settings",
@@ -198,6 +227,9 @@ export const routeTree = rootRoute
     },
     "/connect": {
       "filePath": "connect.tsx"
+    },
+    "/inference": {
+      "filePath": "inference.tsx"
     },
     "/onboarding": {
       "filePath": "onboarding.tsx"

@@ -27,3 +27,20 @@ export function getTotalVRAM(inferenceComputes: { vram: string }[]): number {
   }
   return totalVRAM;
 }
+
+export function getCPUFallbackMemory(
+  inferenceComputes: { library?: string; vram: string }[],
+): number {
+  for (const compute of inferenceComputes) {
+    if (compute.library?.toLowerCase() !== "cpu") {
+      continue;
+    }
+
+    const parsed = parseVRAM(compute.vram);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  return 0;
+}

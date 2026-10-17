@@ -13,12 +13,27 @@ interface SettingsState {
   onboardingVersion: number;
   thinkEnabled: boolean;
   thinkLevel: string;
+  contextLength: number;
   localModelsEnabled: boolean;
+  cpuFallbackEnabled: boolean;
+  inferenceEnabled: boolean;
+  inferenceRuntime: string;
+  inferenceAutoFitEnabled: boolean;
+  inferenceManualLayers: string;
   pluginsEnabled: boolean;
+  fileToolsEnabled: boolean;
 }
 
 // Type for partial settings updates
 type SettingsUpdate = Partial<{
+  Expose: boolean;
+  Browser: boolean;
+  Survey: boolean;
+  Models: string;
+  Agent: boolean;
+  Tools: boolean;
+  WorkingDir: string;
+  ContextLength: number;
   TurboEnabled: boolean;
   WebSearchEnabled: boolean;
   ThinkEnabled: boolean;
@@ -27,7 +42,14 @@ type SettingsUpdate = Partial<{
   SidebarOpen: boolean;
   LastHomeView: string;
   OnboardingVersion: number;
+  AutoUpdateEnabled: boolean;
+  ClaudeDesktopUsed: boolean;
   LocalModelsEnabled: boolean;
+  CPUFallbackEnabled: boolean;
+  InferenceEnabled: boolean;
+  InferenceRuntime: string;
+  InferenceAutoFitEnabled: boolean;
+  InferenceManualLayers: string;
   PluginsEnabled: boolean;
 }>;
 
@@ -74,8 +96,16 @@ export function useSettings() {
       sidebarOpen: settingsData?.settings?.SidebarOpen ?? false,
       lastHomeView: settingsData?.settings?.LastHomeView ?? "chat",
       onboardingVersion: settingsData?.settings?.OnboardingVersion ?? 0,
+      contextLength: settingsData?.settings?.ContextLength ?? 0,
       localModelsEnabled: settingsData?.settings?.LocalModelsEnabled ?? true,
+      cpuFallbackEnabled: settingsData?.settings?.CPUFallbackEnabled ?? false,
+      inferenceEnabled: settingsData?.settings?.InferenceEnabled ?? false,
+      inferenceRuntime: settingsData?.settings?.InferenceRuntime ?? "auto",
+      inferenceAutoFitEnabled:
+        settingsData?.settings?.InferenceAutoFitEnabled ?? true,
+      inferenceManualLayers: settingsData?.settings?.InferenceManualLayers ?? "",
       pluginsEnabled: settingsData?.settings?.PluginsEnabled ?? false,
+      fileToolsEnabled: settingsData?.settings?.Tools ?? false,
     }),
     [settingsData?.settings],
   );

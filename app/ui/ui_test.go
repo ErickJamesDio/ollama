@@ -3,23 +3,215 @@
 package ui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/app/mcp"
 	"github.com/ollama/ollama/app/store"
+	"github.com/ollama/ollama/app/tools"
 	"github.com/ollama/ollama/app/updater"
 	"github.com/ollama/ollama/cmd/launch"
 )
+
+type testTool struct {
+	name string
+}
+
+func (t testTool) Name() string { return t.name }
+
+func (t testTool) Description() string { return "test tool" }
+
+func (t testTool) Schema() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+}
+
+func (t testTool) Execute(context.Context, map[string]any) (any, string, error) {
+	return map[string]any{"ok": true}, "ok", nil
+}
+
+func (t testTool) Prompt() string { return "" }
+
+func slogDiscard() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestUIPluginMCPHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_UI_MCP_HELPER") != "1" {
+		return
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	writer := bufio.NewWriter(os.Stdout)
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		os.Exit(2)
+	}
+
+	var request map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &request); err != nil {
+		os.Exit(3)
+	}
+	if request["method"] != "initialize" {
+		os.Exit(4)
+	}
+
+	writeUIPluginMCPResponse(writer, request["id"], map[string]any{
+		"protocolVersion": "2025-06-18",
+		"serverInfo": map[string]any{
+			"name":    "ui-helper",
+			"version": "1.0.0",
+		},
+		"capabilities": map[string]any{},
+	})
+
+	line, err = reader.ReadString('\n')
+	if err != nil {
+		os.Exit(5)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &request); err != nil {
+		os.Exit(6)
+	}
+	if request["method"] != "notifications/initialized" {
+		os.Exit(7)
+	}
+
+	line, err = reader.ReadString('\n')
+	if err != nil {
+		os.Exit(8)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &request); err != nil {
+		os.Exit(9)
+	}
+	if request["method"] != "tools/list" {
+		os.Exit(10)
+	}
+
+	writeUIPluginMCPResponse(writer, request["id"], map[string]any{
+		"tools": []map[string]any{
+			{
+				"name":        "echo",
+				"description": "Echo a message",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"message": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	})
+}
+
+func writeUIPluginMCPResponse(writer *bufio.Writer, id any, result any) {
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  result,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		os.Exit(11)
+	}
+	body = append(body, '\n')
+	if _, err := writer.Write(body); err != nil {
+		os.Exit(12)
+	}
+	if err := writer.Flush(); err != nil {
+		os.Exit(13)
+	}
+}
+
+func uiHelperPlugin(t *testing.T, name string, enabled bool) store.Plugin {
+	t.Helper()
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+
+	cfg := map[string]any{
+		"command":   exe,
+		"args":      []string{"-test.run=TestUIPluginMCPHelper", "--", "mcp-helper"},
+		"transport": "stdio",
+		"env": map[string]string{
+			"GO_WANT_UI_MCP_HELPER": "1",
+		},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal helper plugin config: %v", err)
+	}
+
+	return store.Plugin{
+		ID:       "mcp:" + name,
+		Name:     name,
+		Provider: "mcp",
+		Enabled:  enabled,
+		Config:   raw,
+	}
+}
+
+func TestBuildChatRequestIncludesPersistentRegistryTools(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(testTool{name: "mcp.example"})
+
+	server := &Server{
+		ToolRegistry: registry,
+	}
+
+	reqRegistry := server.chatToolRegistry()
+	reqRegistry.Register(testTool{name: "request.only"})
+
+	if len(server.ToolRegistry.List()) != 1 {
+		t.Fatalf("persistent registry was mutated, got %d tools", len(server.ToolRegistry.List()))
+	}
+
+	chat := &store.Chat{
+		ID: "chat-1",
+		Messages: []store.Message{
+			store.NewMessage("user", "hello", nil),
+		},
+	}
+
+	req, err := server.buildChatRequest(chat, "test-model", nil, reqRegistry.AvailableTools())
+	if err != nil {
+		t.Fatalf("buildChatRequest() error = %v", err)
+	}
+
+	if len(req.Tools) != 2 {
+		t.Fatalf("buildChatRequest() tools = %d, want 2", len(req.Tools))
+	}
+
+	names := map[string]bool{}
+	for _, tool := range req.Tools {
+		names[tool.Function.Name] = true
+	}
+
+	if !names["mcp.example"] {
+		t.Fatal("expected persistent registry tool to be published to /api/chat")
+	}
+	if !names["request.only"] {
+		t.Fatal("expected request-scoped tool to remain in /api/chat")
+	}
+}
 
 func TestHandlePostApiSettings(t *testing.T) {
 	tests := []struct {
@@ -117,6 +309,37 @@ func TestHandlePostApiSettings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGetSettingsReturnsPersistedToolsPreference(t *testing.T) {
+	testStore := &store.Store{DBPath: filepath.Join(t.TempDir(), "db.sqlite")}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Tools = true
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: testStore, Tools: false}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil)
+	rr := httptest.NewRecorder()
+	if err := server.getSettings(rr, req); err != nil {
+		t.Fatalf("getSettings() error = %v", err)
+	}
+
+	var response struct {
+		Settings store.Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode settings response: %v", err)
+	}
+	if !response.Settings.Tools {
+		t.Fatal("GET settings replaced persisted Tools=true with legacy runtime value")
 	}
 }
 
@@ -793,6 +1016,56 @@ func TestWebSearchToolRegistration(t *testing.T) {
 	}
 }
 
+func TestRequestToolGrants(t *testing.T) {
+	persistent := tools.NewRegistry()
+	persistent.Register(&testTool{name: "mcp.filesystem.read_file"})
+
+	tests := []struct {
+		name             string
+		fileToolsEnabled bool
+		webSearchEnabled bool
+		wantTools        int
+	}{
+		{name: "tools off web off", wantTools: 0},
+		{name: "tools on web off", fileToolsEnabled: true, wantTools: 1},
+		{name: "tools off web on", webSearchEnabled: true, wantTools: 2},
+		{name: "tools on web on", fileToolsEnabled: true, webSearchEnabled: true, wantTools: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := requestToolRegistry(persistent, true, tt.fileToolsEnabled)
+			if tt.webSearchEnabled {
+				registry.Register(&tools.WebSearch{})
+				registry.Register(&tools.WebFetch{})
+			}
+
+			server := &Server{}
+			chat := store.NewChat("chat")
+			chat.Messages = append(chat.Messages, store.NewMessage("user", "hello", nil))
+			req, err := server.buildChatRequest(chat, "qwen3", nil, registry.AvailableTools())
+			if err != nil {
+				t.Fatalf("buildChatRequest() error = %v", err)
+			}
+			if got := len(req.Tools); got != tt.wantTools {
+				t.Fatalf("request tools = %d, want %d", got, tt.wantTools)
+			}
+		})
+	}
+}
+
+func TestPersistentFileToolGrantAcrossConsecutiveSends(t *testing.T) {
+	persistent := tools.NewRegistry()
+	persistent.Register(&testTool{name: "mcp.filesystem.read_file"})
+
+	for send := 1; send <= 2; send++ {
+		registry := requestToolRegistry(persistent, true, true)
+		if got := len(registry.AvailableTools()); got != 1 {
+			t.Fatalf("send %d tool count = %d, want 1", send, got)
+		}
+	}
+}
+
 func TestSettingsToggleAutoUpdateOff_CancelsDownload(t *testing.T) {
 	testStore := &store.Store{
 		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
@@ -1146,6 +1419,305 @@ func TestSettingsUpdatesLocalModelsEnabledWhenProvided(t *testing.T) {
 	}
 }
 
+func TestSettingsPreservesCPUFallbackEnabledWhenOmitted(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.CPUFallbackEnabled = true
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "CPUFallbackEnabled")
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: testStore, Restart: func() {}}
+	req := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	if err := server.settings(rr, req); err != nil {
+		t.Fatalf("settings() error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.CPUFallbackEnabled {
+		t.Fatal("expected CPUFallbackEnabled to be preserved")
+	}
+}
+
+func TestSettingsUpdatesCPUFallbackEnabledWhenProvided(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.CPUFallbackEnabled {
+		t.Fatal("expected CPUFallbackEnabled to start false")
+	}
+
+	settings.CPUFallbackEnabled = true
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{
+		Store:   testStore,
+		Restart: func() {},
+	}
+
+	postReq := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(body))
+	postRR := httptest.NewRecorder()
+	if err := server.settings(postRR, postReq); err != nil {
+		t.Fatalf("settings() POST error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.CPUFallbackEnabled {
+		t.Fatal("expected CPUFallbackEnabled to persist as true")
+	}
+
+	getReq := httptest.NewRequest("GET", "/api/v1/settings", nil)
+	getRR := httptest.NewRecorder()
+	if err := server.getSettings(getRR, getReq); err != nil {
+		t.Fatalf("getSettings() error = %v", err)
+	}
+
+	var response struct {
+		Settings store.Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(getRR.Body).Decode(&response); err != nil {
+		t.Fatalf("decode getSettings response: %v", err)
+	}
+	if !response.Settings.CPUFallbackEnabled {
+		t.Fatal("expected GET /api/v1/settings to return CPUFallbackEnabled=true")
+	}
+}
+
+func TestSettingsPreservesInferenceEnabledWhenOmitted(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.InferenceEnabled = true
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "InferenceEnabled")
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: testStore, Restart: func() {}}
+	req := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	if err := server.settings(rr, req); err != nil {
+		t.Fatalf("settings() error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.InferenceEnabled {
+		t.Fatal("expected InferenceEnabled to be preserved")
+	}
+}
+
+func TestSettingsUpdatesInferenceEnabledWhenProvided(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.InferenceEnabled {
+		t.Fatal("expected InferenceEnabled to start false")
+	}
+
+	settings.InferenceEnabled = true
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{
+		Store:   testStore,
+		Restart: func() {},
+	}
+
+	postReq := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(body))
+	postRR := httptest.NewRecorder()
+	if err := server.settings(postRR, postReq); err != nil {
+		t.Fatalf("settings() POST error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.InferenceEnabled {
+		t.Fatal("expected InferenceEnabled to persist as true")
+	}
+
+	getReq := httptest.NewRequest("GET", "/api/v1/settings", nil)
+	getRR := httptest.NewRecorder()
+	if err := server.getSettings(getRR, getReq); err != nil {
+		t.Fatalf("getSettings() error = %v", err)
+	}
+
+	var response struct {
+		Settings store.Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(getRR.Body).Decode(&response); err != nil {
+		t.Fatalf("decode getSettings response: %v", err)
+	}
+	if !response.Settings.InferenceEnabled {
+		t.Fatal("expected GET /api/v1/settings to return InferenceEnabled=true")
+	}
+}
+
+func TestSettingsPreservesInferenceRuntimeWhenOmitted(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.InferenceRuntime = "cuda_legacy"
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "InferenceRuntime")
+	payload, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: testStore, Restart: func() {}}
+	req := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	if err := server.settings(rr, req); err != nil {
+		t.Fatalf("settings() error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.InferenceRuntime != "cuda_legacy" {
+		t.Fatalf("expected InferenceRuntime to be preserved, got %q", saved.InferenceRuntime)
+	}
+}
+
+func TestSettingsUpdatesInferenceRuntimeWhenProvided(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.InferenceRuntime = "cuda_legacy"
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{
+		Store:   testStore,
+		Restart: func() {},
+	}
+
+	postReq := httptest.NewRequest("POST", "/api/v1/settings", bytes.NewReader(body))
+	postRR := httptest.NewRecorder()
+	if err := server.settings(postRR, postReq); err != nil {
+		t.Fatalf("settings() POST error = %v", err)
+	}
+
+	saved, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.InferenceRuntime != "cuda_legacy" {
+		t.Fatalf("expected InferenceRuntime to persist, got %q", saved.InferenceRuntime)
+	}
+
+	getReq := httptest.NewRequest("GET", "/api/v1/settings", nil)
+	getRR := httptest.NewRecorder()
+	if err := server.getSettings(getRR, getReq); err != nil {
+		t.Fatalf("getSettings() error = %v", err)
+	}
+
+	var response struct {
+		Settings store.Settings `json:"settings"`
+	}
+	if err := json.NewDecoder(getRR.Body).Decode(&response); err != nil {
+		t.Fatalf("decode getSettings response: %v", err)
+	}
+	if response.Settings.InferenceRuntime != "cuda_legacy" {
+		t.Fatalf("expected GET /api/v1/settings to return InferenceRuntime=cuda_legacy, got %q", response.Settings.InferenceRuntime)
+	}
+}
+
 func TestPluginHandlers(t *testing.T) {
 	testStore := &store.Store{
 		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
@@ -1185,7 +1757,9 @@ func TestPluginHandlers(t *testing.T) {
 	}
 
 	var listed struct {
-		Plugins []store.Plugin `json:"plugins"`
+		Plugins []struct {
+			ID string `json:"id"`
+		} `json:"plugins"`
 	}
 	if err := json.NewDecoder(listRR.Body).Decode(&listed); err != nil {
 		t.Fatalf("decode listPlugins response: %v", err)
@@ -1228,6 +1802,222 @@ func TestPluginHandlers(t *testing.T) {
 	}
 	if len(plugins) != 0 {
 		t.Fatalf("expected no plugins after delete, got %d", len(plugins))
+	}
+}
+
+func TestListPluginsIncludesMCPRuntimeState(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.PluginsEnabled = true
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	connected := uiHelperPlugin(t, "connected", true)
+	if err := testStore.UpsertPlugin(connected); err != nil {
+		t.Fatalf("UpsertPlugin(connected) error = %v", err)
+	}
+
+	disabled := uiHelperPlugin(t, "disabled", false)
+	if err := testStore.UpsertPlugin(disabled); err != nil {
+		t.Fatalf("UpsertPlugin(disabled) error = %v", err)
+	}
+
+	badConfig, err := json.Marshal(map[string]any{
+		"command":   "definitely-missing-command-for-mcp-tests",
+		"args":      []string{},
+		"transport": "stdio",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := store.Plugin{
+		ID:       "mcp:failing",
+		Name:     "failing",
+		Provider: "mcp",
+		Enabled:  true,
+		Config:   badConfig,
+	}
+	if err := testStore.UpsertPlugin(failing); err != nil {
+		t.Fatalf("UpsertPlugin(failing) error = %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	manager := mcp.NewManager(context.Background(), nil, registry, slogDiscard())
+	defer manager.Close()
+
+	syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := manager.SyncPlugins(syncCtx, []store.Plugin{connected, disabled, failing}); err == nil {
+		t.Fatal("expected SyncPlugins() to report error for failing plugin")
+	}
+
+	server := &Server{
+		Store:      testStore,
+		MCPManager: manager,
+		Restart:    func() {},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
+	rr := httptest.NewRecorder()
+	if err := server.listPlugins(rr, req); err != nil {
+		t.Fatalf("listPlugins() error = %v", err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("listPlugins() status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	type toolInfo struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Enabled     bool   `json:"enabled"`
+	}
+	type runtimeInfo struct {
+		Status    string     `json:"status"`
+		ToolCount int        `json:"toolCount"`
+		LastError string     `json:"lastError"`
+		Tools     []toolInfo `json:"tools"`
+	}
+	var response struct {
+		Plugins []struct {
+			ID      string      `json:"id"`
+			Enabled bool        `json:"enabled"`
+			Runtime runtimeInfo `json:"runtime"`
+		} `json:"plugins"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode listPlugins response: %v", err)
+	}
+
+	type pluginInfo struct {
+		Enabled bool
+		Runtime runtimeInfo
+	}
+	got := make(map[string]pluginInfo)
+	for _, plugin := range response.Plugins {
+		got[plugin.ID] = pluginInfo{Enabled: plugin.Enabled, Runtime: plugin.Runtime}
+	}
+
+	if got["mcp:connected"].Runtime.Status != "connected" {
+		t.Fatalf("connected runtime status = %q, want %q", got["mcp:connected"].Runtime.Status, "connected")
+	}
+	if got["mcp:connected"].Runtime.ToolCount != 1 {
+		t.Fatalf("connected toolCount = %d, want 1", got["mcp:connected"].Runtime.ToolCount)
+	}
+	if len(got["mcp:connected"].Runtime.Tools) != 1 || got["mcp:connected"].Runtime.Tools[0].Name != "mcp.connected.echo" {
+		t.Fatalf("connected tools = %+v, want one namespaced tool", got["mcp:connected"].Runtime.Tools)
+	}
+	if !got["mcp:connected"].Runtime.Tools[0].Enabled {
+		t.Fatal("expected connected tool to default to enabled")
+	}
+
+	if got["mcp:disabled"].Runtime.Status != "disabled" {
+		t.Fatalf("disabled runtime status = %q, want %q", got["mcp:disabled"].Runtime.Status, "disabled")
+	}
+	if got["mcp:disabled"].Runtime.ToolCount != 0 {
+		t.Fatalf("disabled toolCount = %d, want 0", got["mcp:disabled"].Runtime.ToolCount)
+	}
+
+	if got["mcp:failing"].Runtime.Status != "error" {
+		t.Fatalf("failing runtime status = %q, want %q", got["mcp:failing"].Runtime.Status, "error")
+	}
+	if got["mcp:failing"].Runtime.LastError == "" {
+		t.Fatal("expected failing plugin to include lastError")
+	}
+}
+
+func TestPluginToolHandlerPersistsDisabledToolAndExposesEnabledState(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.PluginsEnabled = true
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	plugin := uiHelperPlugin(t, "toggle", true)
+	if err := testStore.UpsertPlugin(plugin); err != nil {
+		t.Fatalf("UpsertPlugin(toggle) error = %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	manager := mcp.NewManager(context.Background(), testStore, registry, slogDiscard())
+	defer manager.Close()
+
+	syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := manager.SyncFromStore(syncCtx); err != nil {
+		t.Fatalf("SyncFromStore() error = %v", err)
+	}
+
+	server := &Server{
+		Store:      testStore,
+		MCPManager: manager,
+		Restart:    func() {},
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/v1/plugins/mcp:toggle/tools/mcp.toggle.echo", strings.NewReader(`{"enabled":false}`))
+	updateReq.SetPathValue("id", "mcp:toggle")
+	updateReq.SetPathValue("toolName", "mcp.toggle.echo")
+	updateRR := httptest.NewRecorder()
+	if err := server.updatePluginTool(updateRR, updateReq); err != nil {
+		t.Fatalf("updatePluginTool() error = %v", err)
+	}
+	if updateRR.Code != http.StatusOK {
+		t.Fatalf("updatePluginTool() status = %d, want %d", updateRR.Code, http.StatusOK)
+	}
+
+	prefs, err := testStore.PluginToolPreferences()
+	if err != nil {
+		t.Fatalf("PluginToolPreferences() error = %v", err)
+	}
+	if len(prefs) != 1 || prefs[0].PluginID != "mcp:toggle" || prefs[0].ToolName != "mcp.toggle.echo" || prefs[0].Enabled {
+		t.Fatalf("unexpected tool prefs after disable: %+v", prefs)
+	}
+
+	if _, ok := registry.Get("mcp.toggle.echo"); ok {
+		t.Fatal("expected disabled tool to be removed from registry")
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
+	listRR := httptest.NewRecorder()
+	if err := server.listPlugins(listRR, listReq); err != nil {
+		t.Fatalf("listPlugins() error = %v", err)
+	}
+
+	var response struct {
+		Plugins []struct {
+			ID      string `json:"id"`
+			Runtime struct {
+				Tools []struct {
+					Name    string `json:"name"`
+					Enabled bool   `json:"enabled"`
+				} `json:"tools"`
+			} `json:"runtime"`
+		} `json:"plugins"`
+	}
+	if err := json.NewDecoder(listRR.Body).Decode(&response); err != nil {
+		t.Fatalf("decode listPlugins response: %v", err)
+	}
+
+	if len(response.Plugins) != 1 || len(response.Plugins[0].Runtime.Tools) != 1 {
+		t.Fatalf("unexpected plugin runtime response: %+v", response.Plugins)
+	}
+	if response.Plugins[0].Runtime.Tools[0].Name != "mcp.toggle.echo" || response.Plugins[0].Runtime.Tools[0].Enabled {
+		t.Fatalf("unexpected tool runtime after disable: %+v", response.Plugins[0].Runtime.Tools[0])
 	}
 }
 

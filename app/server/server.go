@@ -5,6 +5,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,12 +34,13 @@ type Server struct {
 }
 
 type InferenceCompute struct {
-	Library string
-	Variant string
-	Compute string
-	Driver  string
-	Name    string
-	VRAM    string
+	Library     string
+	Variant     string
+	Compute     string
+	Driver      string
+	Name        string
+	Description string
+	VRAM        string
 }
 
 type InferenceInfo struct {
@@ -52,6 +54,11 @@ func New(s *store.Store, devMode bool) *Server {
 }
 
 func resolvePath(name string) string {
+	names := []string{name}
+	if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+		names = append(names, name+".exe")
+	}
+
 	// look in the app bundle first
 	if exe, _ := os.Executable(); exe != "" {
 		var dir string
@@ -60,18 +67,25 @@ func resolvePath(name string) string {
 		} else {
 			dir = filepath.Join(filepath.Dir(exe), "..", "Resources")
 		}
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return filepath.Join(dir, name)
+		for _, candidate := range names {
+			if _, err := os.Stat(filepath.Join(dir, candidate)); err == nil {
+				return filepath.Join(dir, candidate)
+			}
 		}
 	}
 
 	// check the development dist path
 	for _, path := range []string{
-		filepath.Join("dist", runtime.GOOS, name),
-		filepath.Join("dist", runtime.GOOS+"-"+runtime.GOARCH, name),
+		filepath.Join("dist", runtime.GOOS),
+		filepath.Join("dist", runtime.GOOS+"-"+runtime.GOARCH),
+		filepath.Join("app", "dist", runtime.GOOS),
+		filepath.Join("app", "dist", runtime.GOOS+"-"+runtime.GOARCH),
 	} {
-		if _, err := os.Stat(path); err == nil {
-			return path
+		for _, candidate := range names {
+			fullPath := filepath.Join(path, candidate)
+			if _, err := os.Stat(fullPath); err == nil {
+				return fullPath
+			}
 		}
 	}
 
@@ -263,6 +277,26 @@ func (s *Server) cmd(ctx context.Context) (*exec.Cmd, error) {
 	if settings.ContextLength > 0 {
 		env["OLLAMA_CONTEXT_LENGTH"] = strconv.Itoa(settings.ContextLength)
 	}
+	delete(env, "LLAMA_ARG_FIT")
+	delete(env, "OLLAMA_NUM_GPU")
+	delete(env, "OLLAMA_TENSOR_SPLIT")
+	if !settings.InferenceAutoFitEnabled {
+		env["LLAMA_ARG_FIT"] = "off"
+		if numGPU, tensorSplit, ok := manualGPUPlacement(settings.InferenceManualLayers); ok {
+			env["OLLAMA_NUM_GPU"] = strconv.Itoa(numGPU)
+			if tensorSplit != "" {
+				env["OLLAMA_TENSOR_SPLIT"] = tensorSplit
+			}
+		}
+	}
+	switch strings.TrimSpace(settings.InferenceRuntime) {
+	case "cpu":
+		env["OLLAMA_LLM_LIBRARY"] = "cpu"
+	case "cuda_legacy", "cuda_v12", "cuda_v13", "rocm_v7_1", "rocm_v7_2", "vulkan":
+		env["OLLAMA_LLM_LIBRARY"] = settings.InferenceRuntime
+	default:
+		delete(env, "OLLAMA_LLM_LIBRARY")
+	}
 	if cloudDisabled {
 		env["OLLAMA_NO_CLOUD"] = "1"
 	} else {
@@ -281,6 +315,54 @@ func (s *Server) cmd(ctx context.Context) (*exec.Cmd, error) {
 	}
 
 	return cmd, nil
+}
+
+type manualLayerAllocation struct {
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Layers int    `json:"layers"`
+}
+
+type manualLayerPlan struct {
+	Rows []manualLayerAllocation `json:"rows"`
+}
+
+func manualGPUPlacement(raw string) (numGPU int, tensorSplit string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, "", false
+	}
+
+	var rows []manualLayerAllocation
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		var plan manualLayerPlan
+		if planErr := json.Unmarshal([]byte(raw), &plan); planErr != nil {
+			slog.Warn("invalid manual GPU allocation", "error", err)
+			return 0, "", false
+		}
+		rows = plan.Rows
+	}
+
+	var gpuLayers []string
+	for _, row := range rows {
+		if row.Layers < 0 {
+			row.Layers = 0
+		}
+		if row.Kind != "gpu" {
+			continue
+		}
+		numGPU += row.Layers
+		gpuLayers = append(gpuLayers, strconv.Itoa(row.Layers))
+	}
+	if len(gpuLayers) == 0 {
+		return 0, "", false
+	}
+	if numGPU == 0 {
+		slog.Warn("ignoring empty manual GPU allocation")
+		return 0, "", false
+	}
+
+	return numGPU, strings.Join(gpuLayers, ","), true
 }
 
 func openRotatingLog() (io.WriteCloser, error) {
@@ -374,12 +456,13 @@ func GetInferenceInfo(ctx context.Context) (*InferenceInfo, error) {
 			// Check for inference compute lines
 			if computeMarker.MatchString(line) {
 				ic := InferenceCompute{
-					Library: get("library", line),
-					Variant: get("variant", line),
-					Compute: get("compute", line),
-					Driver:  get("driver", line),
-					Name:    get("name", line),
-					VRAM:    get("total", line),
+					Library:     get("library", line),
+					Variant:     get("variant", line),
+					Compute:     get("compute", line),
+					Driver:      get("driver", line),
+					Name:        get("name", line),
+					Description: get("description", line),
+					VRAM:        get("total", line),
 				}
 
 				slog.Info("Matched", "inference compute", ic)

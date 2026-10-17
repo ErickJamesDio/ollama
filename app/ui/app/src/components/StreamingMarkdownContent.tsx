@@ -6,6 +6,7 @@ import {
 } from "streamdown";
 import remarkCitationParser from "@/utils/remarkCitationParser";
 import CopyButton from "./CopyButton";
+import { Tooltip } from "@/components/ui/tooltip";
 import type { BundledLanguage } from "shiki";
 import { highlighter } from "@/lib/highlighter";
 
@@ -269,15 +270,16 @@ const StreamingMarkdownContent: React.FC<StreamingMarkdownContentProps> =
 
                 if (pageUrl && pageUrl.startsWith("http")) {
                   return (
-                    <a
-                      href={pageUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center hover:opacity-80 transition-opacity no-underline"
-                      title={getPageTitle(pageUrl)}
-                    >
-                      {citationElement}
-                    </a>
+                    <Tooltip content={getPageTitle(pageUrl)}>
+                      <a
+                        href={pageUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center hover:opacity-80 transition-opacity no-underline"
+                      >
+                        {citationElement}
+                      </a>
+                    </Tooltip>
                   );
                 }
 

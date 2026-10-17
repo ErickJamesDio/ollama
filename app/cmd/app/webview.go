@@ -32,6 +32,9 @@ const (
 	onboardingWindowHeight = 660
 	minimumWindowWidth     = onboardingWindowWidth
 	minimumWindowHeight    = onboardingWindowHeight
+
+	// Keep this aligned with the Chat composer FileUpload maxFileSize prop.
+	maxComposerAttachmentSizeMiB = 25
 )
 
 type Webview struct {
@@ -270,6 +273,46 @@ func (w *Webview) Run(path string) unsafe.Pointer {
 			}()
 		})
 
+		wv.Bind("selectModelFiles", func() {
+			go func() {
+				callCallback := func(data interface{}) {
+					dataJSON, _ := json.Marshal(data)
+					wv.Dispatch(func() {
+						wv.Eval(fmt.Sprintf("window.__selectModelFilesCallback && window.__selectModelFilesCallback(%s)", dataJSON))
+					})
+				}
+
+				filenames, err := dialog.File().
+					Filter("GGUF Models", "gguf").
+					Title("Import GGUF Model").
+					LoadMultiple()
+				if err != nil {
+					slog.Debug("GGUF model selection cancelled or failed", "error", err)
+					callCallback(nil)
+					return
+				}
+				if len(filenames) == 0 {
+					callCallback(nil)
+					return
+				}
+
+				var modelFiles []string
+				for _, filename := range filenames {
+					if !strings.EqualFold(filepath.Ext(filename), ".gguf") {
+						slog.Warn("model file extension not allowed, skipping", "filename", filepath.Base(filename))
+						continue
+					}
+					modelFiles = append(modelFiles, filename)
+				}
+				if len(modelFiles) == 0 {
+					callCallback(nil)
+					return
+				}
+
+				callCallback(modelFiles)
+			}()
+		})
+
 		// Bind selectFiles function for selecting multiple files at once
 		wv.Bind("selectFiles", func() {
 			go func() {
@@ -308,7 +351,7 @@ func (w *Webview) Run(path string) unsafe.Pointer {
 				}
 
 				var files []map[string]string
-				maxFileSize := int64(10 * 1024 * 1024) // 10MB
+				maxFileSize := int64(maxComposerAttachmentSizeMiB * 1024 * 1024)
 
 				for _, filename := range filenames {
 					// Check file extension (double-check after native dialog filtering)

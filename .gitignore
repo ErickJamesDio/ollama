@@ -16,3 +16,11 @@ llama/build
 llama/vendor
 /ollama
 integration/testdata/models/
+
+# Local fork build and investigation artifacts
+/.gocache-test/
+/build-*/
+/dist-*/
+/*.log
+/repo-files.txt
+/app/go

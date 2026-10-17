@@ -59,12 +59,17 @@ func init() {
 			slog.Warn("missing ollama.exe and failed to get pwd", "error", err)
 			return
 		}
-		distAppPath := filepath.Join(pwd, "dist", "windows-"+runtime.GOARCH)
-		distOllamaPath := filepath.Join(distAppPath, "ollama.exe")
-		if _, err := os.Stat(distOllamaPath); err == nil {
-			slog.Info("detected developer mode")
-			appPath = distAppPath
-			ollamaPath = distOllamaPath
+		for _, distAppPath := range []string{
+			filepath.Join(pwd, "dist", "windows-"+runtime.GOARCH),
+			filepath.Join(pwd, "app", "dist", "windows-"+runtime.GOARCH),
+		} {
+			distOllamaPath := filepath.Join(distAppPath, "ollama.exe")
+			if _, err := os.Stat(distOllamaPath); err == nil {
+				slog.Info("detected developer mode")
+				appPath = distAppPath
+				ollamaPath = distOllamaPath
+				break
+			}
 		}
 	}
 }

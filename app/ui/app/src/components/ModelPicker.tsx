@@ -12,8 +12,15 @@ import { useCloudStatus } from "@/hooks/useCloudStatus";
 import { useQueryClient } from "@tanstack/react-query";
 import { getModelUpstreamInfo } from "@/api";
 import { ArrowDownTrayIcon } from "@heroicons/react/24/outline";
+import { Tooltip } from "@/components/ui/tooltip";
 
 const stalenessCheckCache = new Map<string, number>();
+
+type DisplayModel = Model & { displayName?: string };
+
+function modelLabel(model: Model | null | undefined) {
+  return (model as DisplayModel | null | undefined)?.displayName || model?.model;
+}
 
 export const ModelPicker = forwardRef<
   HTMLButtonElement,
@@ -141,48 +148,49 @@ export const ModelPicker = forwardRef<
 
   return (
     <div className="relative" ref={dropdownRef}>
-      <button
-        ref={ref}
-        type="button"
-        title="Select model"
-        onClick={() => {
-          const newState = !isOpen;
-          setIsOpen(newState);
-          onDropdownToggle?.(newState);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
+      <Tooltip content="Select model">
+        <button
+          ref={ref}
+          type="button"
+          onClick={() => {
             const newState = !isOpen;
             setIsOpen(newState);
             onDropdownToggle?.(newState);
-          }
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-        className="flex items-center select-none gap-1.5 rounded-full px-3.5 py-1.5 bg-white dark:bg-neutral-700 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-neutral-100 cursor-pointer"
-      >
-        <div className="flex items-center gap-2">
-          <span>
-            {isDisabled
-              ? "Loading..."
-              : selectedModel?.model || "Select a model"}
-          </span>
-        </div>
-        <svg
-          className="h-3 w-3 opacity-70"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          viewBox="0 0 24 24"
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              const newState = !isOpen;
+              setIsOpen(newState);
+              onDropdownToggle?.(newState);
+            }
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          className="flex items-center select-none gap-1.5 rounded-full px-3.5 py-1.5 bg-white dark:bg-neutral-700 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-neutral-100 cursor-pointer"
         >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M19 9l-7 7-7-7"
-          />
-        </svg>
-      </button>
+          <div className="flex items-center gap-2">
+            <span>
+              {isDisabled
+                ? "Loading..."
+                : modelLabel(selectedModel) || "Select a model"}
+            </span>
+          </div>
+          <svg
+            className="h-3 w-3 opacity-70"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M19 9l-7 7-7-7"
+            />
+          </svg>
+        </button>
+      </Tooltip>
       {isOpen && (
         <div className="absolute right-0 text-[15px] bottom-full mb-2 z-50 w-64 rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20">
           <div className="px-1 py-2 border-b border-neutral-100 dark:border-neutral-700">
@@ -318,7 +326,7 @@ export const ModelList = forwardRef(function ModelList(
                 }`}
               >
                 <span className="flex-1 text-left truncate min-w-0">
-                  {model.model}
+                  {modelLabel(model)}
                 </span>
                 {model.isCloud() && (
                   <svg

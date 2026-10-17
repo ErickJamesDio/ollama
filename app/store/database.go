@@ -14,7 +14,7 @@ import (
 
 // currentSchemaVersion defines the current database schema version.
 // Increment this when making schema changes that require migrations.
-const currentSchemaVersion = 20
+const currentSchemaVersion = 28
 
 // database wraps the SQLite connection.
 // SQLite handles its own locking for concurrent access:
@@ -91,6 +91,11 @@ func (db *database) init() error {
 		auto_update_enabled BOOLEAN NOT NULL DEFAULT 1,
 		claude_desktop_used BOOLEAN NOT NULL DEFAULT 0,
 		local_models_enabled BOOLEAN NOT NULL DEFAULT 1,
+		cpu_fallback_enabled BOOLEAN NOT NULL DEFAULT 0,
+		inference_enabled BOOLEAN NOT NULL DEFAULT 0,
+		inference_runtime TEXT NOT NULL DEFAULT 'auto',
+		inference_auto_fit_enabled BOOLEAN NOT NULL DEFAULT 1,
+		inference_manual_layers TEXT NOT NULL DEFAULT '',
 		plugins_enabled BOOLEAN NOT NULL DEFAULT 0,
 		schema_version INTEGER NOT NULL DEFAULT %d
 	);
@@ -166,6 +171,37 @@ func (db *database) init() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_plugins_provider_name ON plugins(provider, name);
+
+	CREATE TABLE IF NOT EXISTS plugin_tool_preferences (
+		plugin_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT 1,
+		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (plugin_id, tool_name),
+		FOREIGN KEY (plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_plugin_tool_preferences_plugin_id ON plugin_tool_preferences(plugin_id);
+
+	CREATE TABLE IF NOT EXISTS model_metadata (
+		model_name TEXT PRIMARY KEY,
+		origin TEXT NOT NULL,
+		source_path TEXT NOT NULL DEFAULT '',
+		display_name TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS context_checkpoints (
+		chat_id TEXT PRIMARY KEY,
+		covered_message_count INTEGER NOT NULL,
+		covered_fingerprint TEXT NOT NULL,
+		content TEXT NOT NULL,
+		estimated_tokens_before INTEGER NOT NULL DEFAULT 0,
+		estimated_tokens_after INTEGER NOT NULL DEFAULT 0,
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+	);
 	`, currentSchemaVersion)
 
 	_, err := db.conn.Exec(schema)
@@ -312,6 +348,54 @@ func (db *database) migrate() error {
 				return fmt.Errorf("migrate v19 to v20: %w", err)
 			}
 			version = 20
+		case 20:
+			// Store per-tool plugin preferences separately from MCP JSON config.
+			if err := db.migrateV20ToV21(); err != nil {
+				return fmt.Errorf("migrate v20 to v21: %w", err)
+			}
+			version = 21
+		case 21:
+			// Allow model recommendations to consider CPU/RAM fallback when enabled.
+			if err := db.migrateV21ToV22(); err != nil {
+				return fmt.Errorf("migrate v21 to v22: %w", err)
+			}
+			version = 22
+		case 22:
+			// Keep advanced inference controls hidden until the user enables them.
+			if err := db.migrateV22ToV23(); err != nil {
+				return fmt.Errorf("migrate v22 to v23: %w", err)
+			}
+			version = 23
+		case 23:
+			// Store the selected local inference runtime.
+			if err := db.migrateV23ToV24(); err != nil {
+				return fmt.Errorf("migrate v23 to v24: %w", err)
+			}
+			version = 24
+		case 24:
+			// Store fork model provenance and display aliases.
+			if err := db.migrateV24ToV25(); err != nil {
+				return fmt.Errorf("migrate v24 to v25: %w", err)
+			}
+			version = 25
+		case 25:
+			// Store non-destructive context compaction checkpoints separately from chat messages.
+			if err := db.migrateV25ToV26(); err != nil {
+				return fmt.Errorf("migrate v25 to v26: %w", err)
+			}
+			version = 26
+		case 26:
+			// Allow users to disable llama.cpp automatic memory fit.
+			if err := db.migrateV26ToV27(); err != nil {
+				return fmt.Errorf("migrate v26 to v27: %w", err)
+			}
+			version = 27
+		case 27:
+			// Store manual GPU allocation intent from the inference page.
+			if err := db.migrateV27ToV28(); err != nil {
+				return fmt.Errorf("migrate v27 to v28: %w", err)
+			}
+			version = 28
 		default:
 			// If we have a version we don't recognize, just set it to current
 			// This might happen during development
@@ -662,6 +746,125 @@ func (db *database) migrateV19ToV20() error {
 	return nil
 }
 
+func (db *database) migrateV20ToV21() error {
+	_, err := db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS plugin_tool_preferences (
+			plugin_id TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			enabled BOOLEAN NOT NULL DEFAULT 1,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (plugin_id, tool_name),
+			FOREIGN KEY (plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create plugin_tool_preferences table: %w", err)
+	}
+
+	_, err = db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_plugin_tool_preferences_plugin_id ON plugin_tool_preferences(plugin_id)`)
+	if err != nil {
+		return fmt.Errorf("create plugin_tool_preferences index: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 21`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+// migrateV21ToV22 adds cpu_fallback_enabled to the settings table.
+func (db *database) migrateV21ToV22() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN cpu_fallback_enabled BOOLEAN NOT NULL DEFAULT 0`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add cpu_fallback_enabled column: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 22`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (db *database) migrateV22ToV23() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN inference_enabled BOOLEAN NOT NULL DEFAULT 0`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add inference_enabled column: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 23`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (db *database) migrateV23ToV24() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN inference_runtime TEXT NOT NULL DEFAULT 'auto'`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add inference_runtime column: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 24`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (db *database) migrateV24ToV25() error {
+	_, err := db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS model_metadata (
+			model_name TEXT PRIMARY KEY,
+			origin TEXT NOT NULL,
+			source_path TEXT NOT NULL DEFAULT '',
+			display_name TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create model metadata table: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 25`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (db *database) migrateV25ToV26() error {
+	_, err := db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS context_checkpoints (
+			chat_id TEXT PRIMARY KEY,
+			covered_message_count INTEGER NOT NULL,
+			covered_fingerprint TEXT NOT NULL,
+			content TEXT NOT NULL,
+			estimated_tokens_before INTEGER NOT NULL DEFAULT 0,
+			estimated_tokens_after INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create context checkpoints table: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 26`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
 // cleanupOrphanedData removes orphaned records that may exist due to the foreign key bug
 func (db *database) cleanupOrphanedData() error {
 	_, err := db.conn.Exec(`
@@ -846,6 +1049,30 @@ func (db *database) saveChat(chat Chat) error {
 		return fmt.Errorf("save chat: %w", err)
 	}
 
+	var checkpoint ContextCheckpoint
+	err = tx.QueryRow(`
+		SELECT chat_id, covered_message_count, covered_fingerprint, content, estimated_tokens_before, estimated_tokens_after, created_at
+		FROM context_checkpoints
+		WHERE chat_id = ?
+	`, chat.ID).Scan(
+		&checkpoint.ChatID,
+		&checkpoint.CoveredMessageCount,
+		&checkpoint.CoveredFingerprint,
+		&checkpoint.Content,
+		&checkpoint.EstimatedTokensBefore,
+		&checkpoint.EstimatedTokensAfter,
+		&checkpoint.CreatedAt,
+	)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("get context checkpoint: %w", err)
+	}
+	if err == nil && (checkpoint.CoveredMessageCount > len(chat.Messages) ||
+		checkpoint.CoveredFingerprint != MessagePrefixFingerprint(chat.Messages, checkpoint.CoveredMessageCount)) {
+		if _, err := tx.Exec(`DELETE FROM context_checkpoints WHERE chat_id = ?`, chat.ID); err != nil {
+			return fmt.Errorf("delete stale context checkpoint: %w", err)
+		}
+	}
+
 	// Delete existing messages (we'll re-insert all)
 	_, err = tx.Exec("DELETE FROM messages WHERE chat_id = ?", chat.ID)
 	if err != nil {
@@ -876,6 +1103,59 @@ func (db *database) updateChatBrowserState(chatID string, state json.RawMessage)
 	_, err := db.conn.Exec(`UPDATE chats SET browser_state = ? WHERE id = ?`, string(state), chatID)
 	if err != nil {
 		return fmt.Errorf("update chat browser state: %w", err)
+	}
+	return nil
+}
+
+func (db *database) getContextCheckpoint(chatID string) (*ContextCheckpoint, error) {
+	var checkpoint ContextCheckpoint
+	err := db.conn.QueryRow(`
+		SELECT chat_id, covered_message_count, covered_fingerprint, content, estimated_tokens_before, estimated_tokens_after, created_at
+		FROM context_checkpoints
+		WHERE chat_id = ?
+	`, chatID).Scan(
+		&checkpoint.ChatID,
+		&checkpoint.CoveredMessageCount,
+		&checkpoint.CoveredFingerprint,
+		&checkpoint.Content,
+		&checkpoint.EstimatedTokensBefore,
+		&checkpoint.EstimatedTokensAfter,
+		&checkpoint.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get context checkpoint: %w", err)
+	}
+	return &checkpoint, nil
+}
+
+func (db *database) saveContextCheckpoint(checkpoint ContextCheckpoint) error {
+	if checkpoint.CreatedAt.IsZero() {
+		checkpoint.CreatedAt = time.Now()
+	}
+	_, err := db.conn.Exec(`
+		INSERT INTO context_checkpoints (chat_id, covered_message_count, covered_fingerprint, content, estimated_tokens_before, estimated_tokens_after, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET
+			covered_message_count = excluded.covered_message_count,
+			covered_fingerprint = excluded.covered_fingerprint,
+			content = excluded.content,
+			estimated_tokens_before = excluded.estimated_tokens_before,
+			estimated_tokens_after = excluded.estimated_tokens_after,
+			created_at = excluded.created_at
+	`, checkpoint.ChatID, checkpoint.CoveredMessageCount, checkpoint.CoveredFingerprint, checkpoint.Content, checkpoint.EstimatedTokensBefore, checkpoint.EstimatedTokensAfter, checkpoint.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("save context checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (db *database) deleteContextCheckpoint(chatID string) error {
+	_, err := db.conn.Exec(`DELETE FROM context_checkpoints WHERE chat_id = ?`, chatID)
+	if err != nil {
+		return fmt.Errorf("delete context checkpoint: %w", err)
 	}
 	return nil
 }
@@ -1310,12 +1590,13 @@ func (db *database) getSettings() (Settings, error) {
 	var s Settings
 
 	err := db.conn.QueryRow(`
-		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, last_home_view, onboarding_version, think_enabled, think_level, auto_update_enabled, claude_desktop_used, local_models_enabled, plugins_enabled
+		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, last_home_view, onboarding_version, think_enabled, think_level, auto_update_enabled, claude_desktop_used, local_models_enabled, cpu_fallback_enabled, inference_enabled, inference_runtime, inference_auto_fit_enabled, inference_manual_layers, plugins_enabled
 		FROM settings
-	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.LastHomeView, &s.OnboardingVersion, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled, &s.ClaudeDesktopUsed, &s.LocalModelsEnabled, &s.PluginsEnabled)
+	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.LastHomeView, &s.OnboardingVersion, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled, &s.ClaudeDesktopUsed, &s.LocalModelsEnabled, &s.CPUFallbackEnabled, &s.InferenceEnabled, &s.InferenceRuntime, &s.InferenceAutoFitEnabled, &s.InferenceManualLayers, &s.PluginsEnabled)
 	if err != nil {
 		return Settings{}, fmt.Errorf("get settings: %w", err)
 	}
+	s.InferenceRuntime = normalizeInferenceRuntime(s.InferenceRuntime)
 
 	return s, nil
 }
@@ -1328,12 +1609,23 @@ func (db *database) setSettings(s Settings) error {
 
 	_, err := db.conn.Exec(`
 		UPDATE settings
-		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, last_home_view = ?, onboarding_version = ?, think_enabled = ?, think_level = ?, auto_update_enabled = ?, claude_desktop_used = ?, local_models_enabled = ?, plugins_enabled = ?
-	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, lastHomeView, s.OnboardingVersion, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled, s.ClaudeDesktopUsed, s.LocalModelsEnabled, s.PluginsEnabled)
+		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, last_home_view = ?, onboarding_version = ?, think_enabled = ?, think_level = ?, auto_update_enabled = ?, claude_desktop_used = ?, local_models_enabled = ?, cpu_fallback_enabled = ?, inference_enabled = ?, inference_runtime = ?, inference_auto_fit_enabled = ?, inference_manual_layers = ?, plugins_enabled = ?
+	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, lastHomeView, s.OnboardingVersion, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled, s.ClaudeDesktopUsed, s.LocalModelsEnabled, s.CPUFallbackEnabled, s.InferenceEnabled, normalizeInferenceRuntime(s.InferenceRuntime), s.InferenceAutoFitEnabled, strings.TrimSpace(s.InferenceManualLayers), s.PluginsEnabled)
 	if err != nil {
 		return fmt.Errorf("set settings: %w", err)
 	}
 	return nil
+}
+
+func normalizeInferenceRuntime(runtime string) string {
+	switch strings.TrimSpace(runtime) {
+	case "", "auto":
+		return "auto"
+	case "cpu", "cuda_legacy", "cuda_v12", "cuda_v13", "rocm_v7_1", "rocm_v7_2", "vulkan":
+		return strings.TrimSpace(runtime)
+	default:
+		return "auto"
+	}
 }
 
 func (db *database) getPlugins() ([]Plugin, error) {
@@ -1428,6 +1720,141 @@ func (db *database) deletePlugin(id string) error {
 	return nil
 }
 
+func (db *database) getPluginToolPreferences() ([]PluginToolPreference, error) {
+	rows, err := db.conn.Query(`
+		SELECT plugin_id, tool_name, enabled, updated_at
+		FROM plugin_tool_preferences
+		ORDER BY plugin_id ASC, tool_name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query plugin tool preferences: %w", err)
+	}
+	defer rows.Close()
+
+	var prefs []PluginToolPreference
+	for rows.Next() {
+		var pref PluginToolPreference
+		if err := rows.Scan(&pref.PluginID, &pref.ToolName, &pref.Enabled, &pref.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan plugin tool preference: %w", err)
+		}
+		prefs = append(prefs, pref)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate plugin tool preferences: %w", err)
+	}
+
+	return prefs, nil
+}
+
+func (db *database) setPluginToolEnabled(pluginID, toolName string, enabled bool) error {
+	if !enabled {
+		result, err := db.conn.Exec(`
+			INSERT INTO plugin_tool_preferences (plugin_id, tool_name, enabled, updated_at)
+			SELECT id, ?, 0, CURRENT_TIMESTAMP
+			FROM plugins
+			WHERE id = ?
+			ON CONFLICT(plugin_id, tool_name) DO UPDATE SET
+				enabled = excluded.enabled,
+				updated_at = CURRENT_TIMESTAMP
+		`, toolName, pluginID)
+		if err != nil {
+			return fmt.Errorf("disable plugin tool: %w", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("plugin tool rows affected: %w", err)
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("plugin not found")
+		}
+
+		return nil
+	}
+
+	if _, err := db.conn.Exec(`
+		DELETE FROM plugin_tool_preferences
+		WHERE plugin_id = ? AND tool_name = ?
+	`, pluginID, toolName); err != nil {
+		return fmt.Errorf("enable plugin tool: %w", err)
+	}
+
+	var exists bool
+	if err := db.conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM plugins WHERE id = ?)`, pluginID).Scan(&exists); err != nil {
+		return fmt.Errorf("check plugin exists: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("plugin not found")
+	}
+
+	return nil
+}
+
+func (db *database) getModelMetadata() ([]ModelMetadata, error) {
+	rows, err := db.conn.Query(`
+		SELECT model_name, origin, source_path, display_name, created_at, updated_at
+		FROM model_metadata
+		ORDER BY model_name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query model metadata: %w", err)
+	}
+	defer rows.Close()
+
+	var metadata []ModelMetadata
+	for rows.Next() {
+		var item ModelMetadata
+		if err := rows.Scan(&item.ModelName, &item.Origin, &item.SourcePath, &item.DisplayName, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan model metadata: %w", err)
+		}
+		metadata = append(metadata, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate model metadata: %w", err)
+	}
+
+	return metadata, nil
+}
+
+func (db *database) upsertModelMetadata(metadata ModelMetadata) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO model_metadata (model_name, origin, source_path, display_name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(model_name) DO UPDATE SET
+			origin = excluded.origin,
+			source_path = excluded.source_path,
+			display_name = excluded.display_name,
+			updated_at = CURRENT_TIMESTAMP
+	`, metadata.ModelName, metadata.Origin, metadata.SourcePath, metadata.DisplayName)
+	if err != nil {
+		return fmt.Errorf("upsert model metadata: %w", err)
+	}
+	return nil
+}
+
+func (db *database) setModelDisplayName(modelName, displayName string) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO model_metadata (model_name, origin, display_name, created_at, updated_at)
+		VALUES (?, 'ollama_storage', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(model_name) DO UPDATE SET
+			display_name = excluded.display_name,
+			updated_at = CURRENT_TIMESTAMP
+	`, modelName, displayName)
+	if err != nil {
+		return fmt.Errorf("set model display name: %w", err)
+	}
+	return nil
+}
+
+func (db *database) deleteModelMetadata(modelName string) error {
+	if _, err := db.conn.Exec(`DELETE FROM model_metadata WHERE model_name = ?`, modelName); err != nil {
+		return fmt.Errorf("delete model metadata: %w", err)
+	}
+	return nil
+}
+
 func (db *database) isCloudSettingMigrated() (bool, error) {
 	var migrated bool
 	err := db.conn.QueryRow("SELECT cloud_setting_migrated FROM settings").Scan(&migrated)
@@ -1485,6 +1912,34 @@ func (db *database) setConfigMigrated(migrated bool) error {
 	if err != nil {
 		return fmt.Errorf("set config migrated: %w", err)
 	}
+	return nil
+}
+
+func (db *database) migrateV26ToV27() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN inference_auto_fit_enabled BOOLEAN NOT NULL DEFAULT 1;`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add inference_auto_fit_enabled column: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 27`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (db *database) migrateV27ToV28() error {
+	_, err := db.conn.Exec(`ALTER TABLE settings ADD COLUMN inference_manual_layers TEXT NOT NULL DEFAULT '';`)
+	if err != nil && !duplicateColumnError(err) {
+		return fmt.Errorf("add inference_manual_layers column: %w", err)
+	}
+
+	_, err = db.conn.Exec(`UPDATE settings SET schema_version = 28`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
 	return nil
 }
 

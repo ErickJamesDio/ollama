@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ollama/ollama/app/auth"
 	"github.com/ollama/ollama/app/logrotate"
+	"github.com/ollama/ollama/app/mcp"
 	"github.com/ollama/ollama/app/server"
 	"github.com/ollama/ollama/app/store"
 	"github.com/ollama/ollama/app/tools"
@@ -238,6 +239,16 @@ func main() {
 	// ctx is the app-level context that will be used to stop the app
 	ctx, cancel := context.WithCancel(context.Background())
 
+	mcpManager := mcp.NewManager(ctx, st, toolRegistry, slog.Default())
+	if err := mcpManager.SyncFromStore(ctx); err != nil {
+		slog.Warn("failed to hydrate MCP plugins at startup", "error", err)
+	}
+	defer func() {
+		if err := mcpManager.Close(); err != nil {
+			slog.Warn("failed to close MCP manager", "error", err)
+		}
+	}()
+
 	// octx is the ollama server context that will be used to stop the ollama server
 	octx, ocancel := context.WithCancel(ctx)
 
@@ -265,6 +276,7 @@ func main() {
 			}()
 		},
 		Store:        st,
+		MCPManager:   mcpManager,
 		ToolRegistry: toolRegistry,
 		Dev:          devMode,
 		Logger:       slog.Default(),

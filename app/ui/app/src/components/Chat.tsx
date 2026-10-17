@@ -95,6 +95,14 @@ export default function Chat({ chatId }: { chatId: string }) {
   const isDownloadingModel = downloadProgress && !downloadProgress.done;
   const isDisabled = !isHealthy;
 
+  useEffect(() => {
+    if (selectedModel?.model) {
+      queryClient.invalidateQueries({
+        queryKey: ["modelCapabilities", selectedModel.model],
+      });
+    }
+  }, [queryClient, selectedModel?.model]);
+
   // Clear editing state when navigating to a different chat
   useEffect(() => {
     setEditingMessage(null);
@@ -200,6 +208,7 @@ export default function Chat({ chatId }: { chatId: string }) {
       onFilesAdded={handleFilesProcessed}
       selectedModel={selectedModel}
       hasVisionCapability={hasVisionCapability}
+      maxFileSize={25}
     >
       {chatId === "new" ? (
         <div className="flex flex-col h-screen justify-center relative">

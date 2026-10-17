@@ -23,20 +23,103 @@ type pluginUpdateRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+type pluginToolUpdateRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+type pluginRuntimeResponse struct {
+	Status    string           `json:"status"`
+	Tools     []pluginToolInfo `json:"tools"`
+	ToolCount int              `json:"toolCount"`
+	LastError string           `json:"lastError,omitempty"`
+}
+
+type pluginToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Enabled     bool   `json:"enabled"`
+}
+
+type pluginResponse struct {
+	store.Plugin
+	Runtime *pluginRuntimeResponse `json:"runtime,omitempty"`
+}
+
 func (s *Server) listPlugins(w http.ResponseWriter, _ *http.Request) error {
 	if ok := s.requirePluginsEnabled(w); !ok {
 		return nil
 	}
 
-	plugins, err := s.Store.Plugins()
+	responsePlugins, err := s.pluginsResponse()
 	if err != nil {
-		return fmt.Errorf("failed to load plugins: %w", err)
+		return err
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(map[string]any{
-		"plugins": plugins,
+		"plugins": responsePlugins,
 	})
+}
+
+func (s *Server) pluginsResponse() ([]pluginResponse, error) {
+	plugins, err := s.Store.Plugins()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load plugins: %w", err)
+	}
+
+	prefs, err := s.Store.PluginToolPreferences()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load plugin tool preferences: %w", err)
+	}
+
+	runtimeByPlugin := map[string]pluginRuntimeResponse{}
+	if s.MCPManager != nil {
+		for pluginID, runtime := range s.MCPManager.Snapshot() {
+			tools := make([]pluginToolInfo, 0, len(runtime.Tools))
+			for _, tool := range runtime.Tools {
+				tools = append(tools, pluginToolInfo{
+					Name:        tool.Name,
+					Description: tool.Description,
+					Enabled:     tool.Enabled,
+				})
+			}
+			runtimeByPlugin[pluginID] = pluginRuntimeResponse{
+				Status:    runtime.Status,
+				Tools:     tools,
+				ToolCount: runtime.ToolCount,
+				LastError: runtime.LastError,
+			}
+		}
+	}
+
+	prefByPlugin := make(map[string]map[string]bool)
+	for _, pref := range prefs {
+		pluginPrefs := prefByPlugin[pref.PluginID]
+		if pluginPrefs == nil {
+			pluginPrefs = make(map[string]bool)
+			prefByPlugin[pref.PluginID] = pluginPrefs
+		}
+		pluginPrefs[pref.ToolName] = pref.Enabled
+	}
+
+	responsePlugins := make([]pluginResponse, 0, len(plugins))
+	for _, plugin := range plugins {
+		item := pluginResponse{Plugin: plugin}
+		if plugin.Provider == pluginProviderMCP {
+			runtime := runtimeByPlugin[plugin.ID]
+			runtime.Tools = mergePluginTools(runtime.Tools, prefByPlugin[plugin.ID])
+			runtime.ToolCount = len(runtime.Tools)
+			if !plugin.Enabled {
+				runtime.Status = "disabled"
+			} else if runtime.Status == "" {
+				runtime.Status = "error"
+			}
+			item.Runtime = &runtime
+		}
+		responsePlugins = append(responsePlugins, item)
+	}
+
+	return responsePlugins, nil
 }
 
 func (s *Server) importPlugins(w http.ResponseWriter, r *http.Request) error {
@@ -61,15 +144,20 @@ func (s *Server) importPlugins(w http.ResponseWriter, r *http.Request) error {
 			return fmt.Errorf("failed to save plugin %q: %w", plugin.Name, err)
 		}
 	}
+	if s.MCPManager != nil {
+		if err := s.MCPManager.SyncFromStore(r.Context()); err != nil {
+			return fmt.Errorf("failed to sync MCP plugins: %w", err)
+		}
+	}
 
-	saved, err := s.Store.Plugins()
+	responsePlugins, err := s.pluginsResponse()
 	if err != nil {
-		return fmt.Errorf("failed to reload plugins: %w", err)
+		return err
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(map[string]any{
-		"plugins": saved,
+		"plugins": responsePlugins,
 	})
 }
 
@@ -94,10 +182,54 @@ func (s *Server) updatePlugin(w http.ResponseWriter, r *http.Request) error {
 		s.writeJSONError(w, http.StatusNotFound, "Plugin not found.")
 		return nil
 	}
+	if s.MCPManager != nil {
+		if err := s.MCPManager.SyncFromStore(r.Context()); err != nil {
+			return fmt.Errorf("failed to sync MCP plugins: %w", err)
+		}
+	}
 
-	plugins, err := s.Store.Plugins()
+	plugins, err := s.pluginsResponse()
 	if err != nil {
-		return fmt.Errorf("failed to reload plugins: %w", err)
+		return err
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{
+		"plugins": plugins,
+	})
+}
+
+func (s *Server) updatePluginTool(w http.ResponseWriter, r *http.Request) error {
+	if ok := s.requirePluginsEnabled(w); !ok {
+		return nil
+	}
+
+	id := r.PathValue("id")
+	toolName := r.PathValue("toolName")
+	if id == "" || toolName == "" {
+		s.writeJSONError(w, http.StatusBadRequest, "Plugin id and tool name are required.")
+		return nil
+	}
+
+	var req pluginToolUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeJSONError(w, http.StatusBadRequest, "Invalid request body.")
+		return nil
+	}
+
+	if err := s.Store.SetPluginToolEnabled(id, toolName, req.Enabled); err != nil {
+		s.writeJSONError(w, http.StatusNotFound, "Plugin not found.")
+		return nil
+	}
+	if s.MCPManager != nil {
+		if err := s.MCPManager.SyncFromStore(r.Context()); err != nil {
+			return fmt.Errorf("failed to sync MCP plugins: %w", err)
+		}
+	}
+
+	plugins, err := s.pluginsResponse()
+	if err != nil {
+		return err
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -120,6 +252,11 @@ func (s *Server) deletePlugin(w http.ResponseWriter, r *http.Request) error {
 	if err := s.Store.DeletePlugin(id); err != nil {
 		s.writeJSONError(w, http.StatusNotFound, "Plugin not found.")
 		return nil
+	}
+	if s.MCPManager != nil {
+		if err := s.MCPManager.SyncFromStore(r.Context()); err != nil {
+			return fmt.Errorf("failed to sync MCP plugins: %w", err)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -336,4 +473,32 @@ func normalizeStringMap(value any) (map[string]string, error) {
 		env[key] = text
 	}
 	return env, nil
+}
+
+func mergePluginTools(runtimeTools []pluginToolInfo, prefs map[string]bool) []pluginToolInfo {
+	tools := make([]pluginToolInfo, 0, len(runtimeTools)+len(prefs))
+	seen := make(map[string]bool, len(runtimeTools))
+	for _, tool := range runtimeTools {
+		if enabled, ok := prefs[tool.Name]; ok {
+			tool.Enabled = enabled
+		}
+		tools = append(tools, tool)
+		seen[tool.Name] = true
+	}
+
+	for name, enabled := range prefs {
+		if seen[name] {
+			continue
+		}
+		tools = append(tools, pluginToolInfo{
+			Name:    name,
+			Enabled: enabled,
+		})
+	}
+
+	sort.Slice(tools, func(i, j int) bool {
+		return tools[i].Name < tools[j].Name
+	})
+
+	return tools
 }

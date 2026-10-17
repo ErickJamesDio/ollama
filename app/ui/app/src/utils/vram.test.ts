@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseVRAM, getTotalVRAM } from "./vram";
+import { parseVRAM, getTotalVRAM, getCPUFallbackMemory } from "./vram";
 
 describe("VRAM Utilities", () => {
   describe("parseVRAM", () => {
@@ -116,6 +116,29 @@ describe("VRAM Utilities", () => {
     it("should handle decimal values", () => {
       const computes = [{ vram: "8.5 GiB" }, { vram: "4.25 GiB" }];
       expect(getTotalVRAM(computes)).toBe(12.75);
+    });
+  });
+
+  describe("getCPUFallbackMemory", () => {
+    it("returns the cpu memory budget when a cpu compute is present", () => {
+      const computes = [
+        { library: "cuda", vram: "8 GiB" },
+        { library: "cpu", vram: "31.3 GiB" },
+      ];
+
+      expect(getCPUFallbackMemory(computes)).toBe(31.3);
+    });
+
+    it("ignores non-cpu computes", () => {
+      const computes = [{ library: "rocm", vram: "8 GiB" }];
+
+      expect(getCPUFallbackMemory(computes)).toBe(0);
+    });
+
+    it("ignores invalid cpu memory strings", () => {
+      const computes = [{ library: "cpu", vram: "invalid" }];
+
+      expect(getCPUFallbackMemory(computes)).toBe(0);
     });
   });
 });

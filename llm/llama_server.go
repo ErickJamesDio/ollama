@@ -415,6 +415,7 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 		params = append(params, "-t", strconv.Itoa(launch.opts.NumThread))
 	}
 
+	params = appendTensorSplitArgs(params, launch.opts)
 	params = appendMainGPUArgs(params, launch.opts)
 
 	params = appendContextShiftArgs(params, launch.opts, launch.config.ContextShift)
@@ -646,6 +647,15 @@ func appendMainGPUArgs(params []string, opts api.Options) []string {
 	return append(params, "--split-mode", "none", "--main-gpu", strconv.Itoa(*opts.MainGPU))
 }
 
+func appendTensorSplitArgs(params []string, opts api.Options) []string {
+	split := strings.TrimSpace(opts.TensorSplit)
+	if split == "" {
+		return params
+	}
+
+	return append(params, "--tensor-split", split)
+}
+
 func appendMMProjArgs(params []string, launch llamaServerLaunchConfig) []string {
 	if len(launch.projectors) == 0 {
 		return params
@@ -655,6 +665,15 @@ func appendMMProjArgs(params []string, launch llamaServerLaunchConfig) []string 
 	if disable, reason := launch.mmprojOffloadDisabled(); disable {
 		slog.Info("disabling multimodal projector offload", "reason", reason, "model", launch.modelPath, "projector", launch.projectors[0])
 		params = append(params, "--no-mmproj-offload")
+	} else {
+		slog.Info("enabling multimodal projector offload",
+			"model", launch.modelPath,
+			"projector", launch.projectors[0],
+			"gpu_layers", launch.opts.NumGPU,
+			"model_layers", launch.modelLayers,
+			"projector_memory", launch.mmprojMemory,
+			"headroom", mmprojOffloadHeadroom,
+		)
 	}
 
 	return params
@@ -664,15 +683,12 @@ func (launch llamaServerLaunchConfig) mmprojOffloadDisabled() (bool, string) {
 	if launch.forceNoMMProjOffload {
 		return true, "startup-oom-retry"
 	}
-	return shouldDisableMMProjOffload(launch.opts, launch.gpus, launch.modelLayers, launch.mmprojMemory)
+	return shouldDisableMMProjOffload(launch.opts, launch.gpus, launch.mmprojMemory)
 }
 
-func shouldDisableMMProjOffload(opts api.Options, gpus []ml.DeviceInfo, modelLayers, mmprojMemory uint64) (bool, string) {
+func shouldDisableMMProjOffload(opts api.Options, gpus []ml.DeviceInfo, mmprojMemory uint64) (bool, string) {
 	if opts.NumGPU == 0 {
 		return true, "cpu-only"
-	}
-	if opts.NumGPU > 0 && modelLayers > 0 && uint64(opts.NumGPU) < modelLayers {
-		return true, "partial-text-offload"
 	}
 
 	requiredMemory := mmprojMemory + mmprojOffloadHeadroom
@@ -2867,4 +2883,23 @@ func (s *llamaServerRunner) VRAMByGPU(id ml.DeviceID) uint64 {
 		}
 	}
 	return 0
+}
+
+func (s *llamaServerRunner) PlacementInfo() PlacementInfo {
+	s.memoryMu.RLock()
+	defer s.memoryMu.RUnlock()
+
+	devices := make([]PlacementDevice, 0, len(s.gpus))
+	for _, gpu := range s.gpus {
+		devices = append(devices, PlacementDevice{
+			Name: gpu.Name,
+			VRAM: s.vramByDevice[gpu.Name],
+		})
+	}
+
+	return PlacementInfo{
+		GPULayers:   s.gpuLayers,
+		TotalLayers: s.totalLayers,
+		Devices:     devices,
+	}
 }

@@ -6,6 +6,7 @@
 package store
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -86,6 +87,35 @@ func NewMessage(role, content string, opts *MessageOptions) Message {
 	return msg
 }
 
+func MessagePrefixFingerprint(messages []Message, count int) string {
+	if count > len(messages) {
+		count = len(messages)
+	}
+	hash := sha256.New()
+	for i := 0; i < count; i++ {
+		msg := messages[i]
+		hash.Write([]byte(msg.Role))
+		hash.Write([]byte{0})
+		hash.Write([]byte(msg.Content))
+		hash.Write([]byte{0})
+		hash.Write([]byte(msg.Thinking))
+		hash.Write([]byte{0})
+		hash.Write([]byte(msg.Model))
+		hash.Write([]byte{0})
+		for _, tc := range msg.ToolCalls {
+			hash.Write([]byte(tc.Function.Name))
+			hash.Write([]byte{0})
+			hash.Write([]byte(tc.Function.Arguments))
+			hash.Write([]byte{0})
+		}
+		for _, att := range msg.Attachments {
+			hash.Write([]byte(att.Filename))
+			hash.Write([]byte{0})
+		}
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
+}
+
 type ToolCall struct {
 	Type     string       `json:"type"`
 	Function ToolFunction `json:"function"`
@@ -111,6 +141,32 @@ type Plugin struct {
 	Config    json.RawMessage `json:"config"`
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+type PluginToolPreference struct {
+	PluginID  string    `json:"plugin_id"`
+	ToolName  string    `json:"tool_name"`
+	Enabled   bool      `json:"enabled"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type ModelMetadata struct {
+	ModelName   string    `json:"model_name"`
+	Origin      string    `json:"origin"`
+	SourcePath  string    `json:"source_path,omitempty"`
+	DisplayName string    `json:"display_name,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type ContextCheckpoint struct {
+	ChatID                string    `json:"chat_id"`
+	CoveredMessageCount   int       `json:"covered_message_count"`
+	CoveredFingerprint    string    `json:"covered_fingerprint"`
+	Content               string    `json:"content"`
+	EstimatedTokensBefore int       `json:"estimated_tokens_before"`
+	EstimatedTokensAfter  int       `json:"estimated_tokens_after"`
+	CreatedAt             time.Time `json:"created_at"`
 }
 
 type Chat struct {
@@ -191,6 +247,21 @@ type Settings struct {
 
 	// LocalModelsEnabled controls whether local non-cloud models appear in the model selector.
 	LocalModelsEnabled bool
+
+	// CPUFallbackEnabled allows model recommendations to consider CPU/RAM fallback when VRAM is limited.
+	CPUFallbackEnabled bool
+
+	// InferenceEnabled controls whether the advanced inference section is visible in the desktop UI.
+	InferenceEnabled bool
+
+	// InferenceRuntime selects a specific local inference runtime, or auto for native discovery.
+	InferenceRuntime string
+
+	// InferenceAutoFitEnabled allows llama.cpp to automatically adjust memory placement.
+	InferenceAutoFitEnabled bool
+
+	// InferenceManualLayers stores the user's manual GPU/CPU layer allocation intent as JSON.
+	InferenceManualLayers string
 
 	// PluginsEnabled controls whether plugin configuration and UI are active.
 	PluginsEnabled bool
@@ -474,6 +545,54 @@ func (s *Store) DeletePlugin(id string) error {
 	return s.db.deletePlugin(id)
 }
 
+func (s *Store) PluginToolPreferences() ([]PluginToolPreference, error) {
+	if err := s.ensureDB(); err != nil {
+		return nil, err
+	}
+
+	return s.db.getPluginToolPreferences()
+}
+
+func (s *Store) SetPluginToolEnabled(pluginID, toolName string, enabled bool) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.setPluginToolEnabled(pluginID, toolName, enabled)
+}
+
+func (s *Store) ModelMetadata() ([]ModelMetadata, error) {
+	if err := s.ensureDB(); err != nil {
+		return nil, err
+	}
+
+	return s.db.getModelMetadata()
+}
+
+func (s *Store) UpsertModelMetadata(metadata ModelMetadata) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.upsertModelMetadata(metadata)
+}
+
+func (s *Store) SetModelDisplayName(modelName, displayName string) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.setModelDisplayName(modelName, displayName)
+}
+
+func (s *Store) DeleteModelMetadata(modelName string) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.deleteModelMetadata(modelName)
+}
+
 func (s *Store) Chats() ([]Chat, error) {
 	if err := s.ensureDB(); err != nil {
 		return nil, err
@@ -565,6 +684,41 @@ func (s *Store) UpdateChatBrowserState(chatID string, state json.RawMessage) err
 	}
 
 	return s.db.updateChatBrowserState(chatID, state)
+}
+
+func (s *Store) ContextCheckpoint(chatID string, messages []Message) (*ContextCheckpoint, error) {
+	if err := s.ensureDB(); err != nil {
+		return nil, err
+	}
+
+	checkpoint, err := s.db.getContextCheckpoint(chatID)
+	if err != nil || checkpoint == nil {
+		return checkpoint, err
+	}
+	if checkpoint.CoveredMessageCount > len(messages) ||
+		checkpoint.CoveredFingerprint != MessagePrefixFingerprint(messages, checkpoint.CoveredMessageCount) {
+		if err := s.db.deleteContextCheckpoint(chatID); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return checkpoint, nil
+}
+
+func (s *Store) SaveContextCheckpoint(checkpoint ContextCheckpoint) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.saveContextCheckpoint(checkpoint)
+}
+
+func (s *Store) DeleteContextCheckpoint(chatID string) error {
+	if err := s.ensureDB(); err != nil {
+		return err
+	}
+
+	return s.db.deleteContextCheckpoint(chatID)
 }
 
 func (s *Store) User() (*User, error) {

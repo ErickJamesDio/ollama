@@ -147,8 +147,15 @@ export function FileUpload({
   // Paste event handler
   const handlePaste = useCallback(
     async (e: ClipboardEvent) => {
+      const hasClipboardFiles =
+        e.clipboardData &&
+        (e.clipboardData.files.length > 0 ||
+          Array.from(e.clipboardData.items).some(
+            (item) => item.kind === "file",
+          ));
+
       // Check if clipboard contains files
-      if (e.clipboardData && e.clipboardData.files.length > 0) {
+      if (e.clipboardData && hasClipboardFiles) {
         // Check if there's text data in the clipboard
         // Only process files if there's no text data
         const hasTextData =

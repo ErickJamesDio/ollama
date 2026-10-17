@@ -1,6 +1,7 @@
 import { getClaudeDesktopAvailableModels } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Tooltip } from "@/components/ui/tooltip";
 import {
   addClaudeModelSelection,
   claudeDesktopRecoveryMessage,
@@ -309,28 +310,31 @@ export function ClaudeDesktopModelsSettings({
                   model.availability !== undefined &&
                   model.availability !== "available";
                 return (
-                  <label
+                  <Tooltip
                     key={model.name}
-                    className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-1 text-sm text-neutral-600 dark:text-neutral-300"
-                    title={accessLabel ?? model.description}
+                    content={accessLabel ?? model.description}
+                    className="min-w-0"
+                    tooltipClassName="w-72 whitespace-normal text-left"
                   >
-                    <input
-                      type="checkbox"
-                      checked={selected}
-                      disabled={
-                        restarting ||
-                        (!selected && (selectionFull || unavailable))
-                      }
-                      onChange={() => toggleModel(model.name)}
-                      className="h-4 w-4 rounded border-neutral-300 accent-neutral-900 dark:border-neutral-600 dark:accent-white"
-                    />
-                    <span className="truncate">{model.displayName}</span>
-                    {accessLabel && (
-                      <span className="flex-shrink-0 text-xs text-neutral-400">
-                        {accessLabel}
-                      </span>
-                    )}
-                  </label>
+                    <label className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md py-1 text-sm text-neutral-600 dark:text-neutral-300">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={
+                          restarting ||
+                          (!selected && (selectionFull || unavailable))
+                        }
+                        onChange={() => toggleModel(model.name)}
+                        className="h-4 w-4 rounded border-neutral-300 accent-neutral-900 dark:border-neutral-600 dark:accent-white"
+                      />
+                      <span className="truncate">{model.displayName}</span>
+                      {accessLabel && (
+                        <span className="flex-shrink-0 text-xs text-neutral-400">
+                          {accessLabel}
+                        </span>
+                      )}
+                    </label>
+                  </Tooltip>
                 );
               })}
             </div>

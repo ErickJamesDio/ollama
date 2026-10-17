@@ -187,12 +187,46 @@ export class Chat {
 	    return a;
 	}
 }
+export class ContextCheckpointInfo {
+    covered_message_count: number;
+    estimated_tokens_before: number;
+    estimated_tokens_after: number;
+    created_at: Date;
+
+    constructor(source: any = {}) {
+        if ('string' === typeof source) source = JSON.parse(source);
+        this.covered_message_count = source["covered_message_count"];
+        this.estimated_tokens_before = source["estimated_tokens_before"];
+        this.estimated_tokens_after = source["estimated_tokens_after"];
+        this.created_at = new Date(source["created_at"]);
+    }
+
+	convertValues(a: any, classs: any, asMap: boolean = false): any {
+	    if (!a) {
+	        return a;
+	    }
+	    if (Array.isArray(a)) {
+	        return (a as any[]).map(elem => this.convertValues(elem, classs));
+	    } else if ("object" === typeof a) {
+	        if (asMap) {
+	            for (const key of Object.keys(a)) {
+	                a[key] = new classs(a[key]);
+	            }
+	            return a;
+	        }
+	        return new classs(a);
+	    }
+	    return a;
+	}
+}
 export class ChatResponse {
     chat: Chat;
+    contextCheckpoint?: ContextCheckpointInfo;
 
     constructor(source: any = {}) {
         if ('string' === typeof source) source = JSON.parse(source);
         this.chat = this.convertValues(source["chat"], Chat);
+        this.contextCheckpoint = this.convertValues(source["contextCheckpoint"], ContextCheckpointInfo);
     }
 
 	convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -275,6 +309,7 @@ export class InferenceCompute {
     compute: string;
     driver: string;
     name: string;
+    description: string;
     vram: string;
 
     constructor(source: any = {}) {
@@ -284,6 +319,7 @@ export class InferenceCompute {
         this.compute = source["compute"];
         this.driver = source["driver"];
         this.name = source["name"];
+        this.description = source["description"];
         this.vram = source["vram"];
     }
 }
@@ -324,7 +360,7 @@ export class ModelCapabilitiesResponse {
     }
 }
 export class ChatEvent {
-    eventName: "chat" | "thinking" | "assistant_with_tools" | "tool_call" | "tool" | "tool_result" | "done" | "chat_created";
+    eventName: "chat" | "thinking" | "assistant_with_tools" | "tool_call" | "tool" | "tool_result" | "context_compaction" | "done" | "chat_created";
     content?: string;
     thinking?: string;
     thinkingTimeStart?: Date | undefined;
@@ -419,6 +455,11 @@ export class Settings {
     AutoUpdateEnabled: boolean;
     ClaudeDesktopUsed: boolean;
     LocalModelsEnabled: boolean;
+    CPUFallbackEnabled: boolean;
+    InferenceEnabled: boolean;
+    InferenceRuntime: string;
+    InferenceAutoFitEnabled: boolean;
+    InferenceManualLayers: string;
     PluginsEnabled: boolean;
 
     constructor(source: any = {}) {
@@ -442,6 +483,11 @@ export class Settings {
         this.AutoUpdateEnabled = source["AutoUpdateEnabled"];
         this.ClaudeDesktopUsed = source["ClaudeDesktopUsed"];
         this.LocalModelsEnabled = source["LocalModelsEnabled"];
+        this.CPUFallbackEnabled = source["CPUFallbackEnabled"];
+        this.InferenceEnabled = source["InferenceEnabled"];
+        this.InferenceRuntime = source["InferenceRuntime"];
+        this.InferenceAutoFitEnabled = source["InferenceAutoFitEnabled"];
+        this.InferenceManualLayers = source["InferenceManualLayers"];
         this.PluginsEnabled = source["PluginsEnabled"];
     }
 }
@@ -520,6 +566,8 @@ export class ChatRequest {
     file_tools?: boolean;
     forceUpdate?: boolean;
     think?: any;
+    trace_id?: string;
+    ux_estimated_context_tokens?: number;
 
     constructor(source: any = {}) {
         if ('string' === typeof source) source = JSON.parse(source);
@@ -531,6 +579,8 @@ export class ChatRequest {
         this.file_tools = source["file_tools"];
         this.forceUpdate = source["forceUpdate"];
         this.think = source["think"];
+        this.trace_id = source["trace_id"];
+        this.ux_estimated_context_tokens = source["ux_estimated_context_tokens"];
     }
 
 	convertValues(a: any, classs: any, asMap: boolean = false): any {

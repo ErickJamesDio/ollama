@@ -54,6 +54,7 @@ type ClaudeDesktopInstallResult = "opened" | "cancelled" | "failed";
 interface WebviewAPI {
   selectFile: () => Promise<ImageData | null>;
   selectMultipleFiles: () => Promise<ImageData[] | null>;
+  selectModelFiles: () => Promise<string[] | null>;
   selectModelsDirectory: () => Promise<string | null>;
   selectWorkingDirectory: () => Promise<string | null>;
 }

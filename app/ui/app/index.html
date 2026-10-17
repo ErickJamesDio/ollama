@@ -40,6 +40,19 @@
         };
       }
 
+      if (typeof window.selectModelFiles === "function") {
+        window.webview = window.webview || {};
+        window.webview.selectModelFiles = function () {
+          return new Promise((resolve) => {
+            window.__selectModelFilesCallback = (paths) => {
+              window.__selectModelFilesCallback = null;
+              resolve(paths); // Returns model file paths or null if cancelled
+            };
+            window.selectModelFiles();
+          });
+        };
+      }
+
       // Add directory selection methods if available
       if (typeof window.selectModelsDirectory === "function") {
         window.webview = window.webview || {};

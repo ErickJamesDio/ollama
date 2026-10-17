@@ -28,20 +28,89 @@ type Tool interface {
 
 // Registry manages the available tools and their execution
 type Registry struct {
-	tools      map[string]Tool
-	workingDir string // Working directory for all tool operations
+	tools       map[string]Tool
+	toolSources map[string]string
+	sourceTools map[string][]string
+	workingDir  string // Working directory for all tool operations
 }
 
 // NewRegistry creates a new tool registry with no tools
 func NewRegistry() *Registry {
 	return &Registry{
-		tools: make(map[string]Tool),
+		tools:       make(map[string]Tool),
+		toolSources: make(map[string]string),
+		sourceTools: make(map[string][]string),
 	}
+}
+
+// Clone creates a shallow copy of the registry so request-scoped tools can be
+// added without mutating the shared persistent registry.
+func (r *Registry) Clone() *Registry {
+	clone := NewRegistry()
+	if r == nil {
+		return clone
+	}
+
+	clone.workingDir = r.workingDir
+	for name, tool := range r.tools {
+		clone.tools[name] = tool
+	}
+	for name, source := range r.toolSources {
+		clone.toolSources[name] = source
+	}
+	for source, names := range r.sourceTools {
+		clone.sourceTools[source] = append([]string(nil), names...)
+	}
+
+	return clone
 }
 
 // Register adds a tool to the registry
 func (r *Registry) Register(tool Tool) {
-	r.tools[tool.Name()] = tool
+	r.RegisterFromSource("", tool)
+}
+
+// RegisterFromSource adds a tool to the registry and associates it with a
+// stable source identifier so it can be replaced or removed later.
+func (r *Registry) RegisterFromSource(source string, tool Tool) {
+	if r.tools == nil {
+		r.tools = make(map[string]Tool)
+	}
+	if r.toolSources == nil {
+		r.toolSources = make(map[string]string)
+	}
+	if r.sourceTools == nil {
+		r.sourceTools = make(map[string][]string)
+	}
+
+	name := tool.Name()
+	if previousSource, ok := r.toolSources[name]; ok {
+		r.removeToolFromSource(previousSource, name)
+	}
+
+	r.tools[name] = tool
+	r.toolSources[name] = source
+	r.sourceTools[source] = appendUnique(r.sourceTools[source], name)
+}
+
+// ReplaceSource replaces all tools owned by source with the provided set.
+func (r *Registry) ReplaceSource(source string, tools []Tool) {
+	r.RemoveSource(source)
+	for _, tool := range tools {
+		r.RegisterFromSource(source, tool)
+	}
+}
+
+// RemoveSource removes all tools that were previously registered for source.
+func (r *Registry) RemoveSource(source string) {
+	names := append([]string(nil), r.sourceTools[source]...)
+	for _, name := range names {
+		if currentSource, ok := r.toolSources[name]; ok && currentSource == source {
+			delete(r.tools, name)
+			delete(r.toolSources, name)
+		}
+	}
+	delete(r.sourceTools, source)
 }
 
 // Get retrieves a tool by name
@@ -72,10 +141,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	}
 
 	result, text, err := tool.Execute(ctx, args)
-	if err != nil {
-		return nil, "", err
-	}
-	return result, text, nil
+	return result, text, err
 }
 
 // ToolCall represents a request to execute a tool
@@ -119,4 +185,28 @@ func (r *Registry) ToolNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+func (r *Registry) removeToolFromSource(source, name string) {
+	names := r.sourceTools[source]
+	filtered := names[:0]
+	for _, candidate := range names {
+		if candidate != name {
+			filtered = append(filtered, candidate)
+		}
+	}
+	if len(filtered) == 0 {
+		delete(r.sourceTools, source)
+		return
+	}
+	r.sourceTools[source] = filtered
+}
+
+func appendUnique(items []string, item string) []string {
+	for _, existing := range items {
+		if existing == item {
+			return items
+		}
+	}
+	return append(items, item)
 }

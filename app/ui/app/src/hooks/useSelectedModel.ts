@@ -4,14 +4,22 @@ import { useModels } from "./useModels";
 import { useChat } from "./useChats";
 import { useSettings } from "./useSettings.ts";
 import { Model } from "@/gotypes";
-import { getTotalVRAM } from "@/utils/vram.ts";
+import { getCPUFallbackMemory, getTotalVRAM } from "@/utils/vram.ts";
 import { getInferenceCompute } from "@/api";
 import { useCloudStatus } from "./useCloudStatus";
 
-export function recommendDefaultModel(totalVRAM: number): string {
+export function recommendDefaultModel(
+  totalVRAM: number,
+  cpuFallbackEnabled = false,
+  cpuFallbackMemory = 0,
+): string {
   const vram = Math.max(0, Number(totalVRAM) || 0);
+  const memory = Math.max(0, Number(cpuFallbackMemory) || 0);
 
   if (vram < 6) {
+    if (cpuFallbackEnabled && memory >= 24) {
+      return "gemma3:4b";
+    }
     return "gemma3:1b";
   } else if (vram < 16) {
     return "gemma3:4b";
@@ -39,10 +47,19 @@ export function useSelectedModel(currentChatId?: string, searchQuery?: string) {
     () => getTotalVRAM(inferenceComputes),
     [inferenceComputes],
   );
+  const cpuFallbackMemory = useMemo(
+    () => getCPUFallbackMemory(inferenceComputes),
+    [inferenceComputes],
+  );
 
   const recommendedModel = useMemo(
-    () => recommendDefaultModel(totalVRAM),
-    [totalVRAM],
+    () =>
+      recommendDefaultModel(
+        totalVRAM,
+        settings.cpuFallbackEnabled,
+        cpuFallbackMemory,
+      ),
+    [cpuFallbackMemory, settings.cpuFallbackEnabled, totalVRAM],
   );
 
   // Track which chat we've already restored the model for
@@ -169,7 +186,7 @@ export function useSelectedModel(currentChatId?: string, searchQuery?: string) {
 
     const defaultModel =
       models.find((m) => m.model === recommendedModel) ||
-      (cloudDisabled
+      ((cloudDisabled || settings.cpuFallbackEnabled)
         ? models.find((m) => !m.isCloud())
         : models.find((m) => m.isCloud())) ||
       models.find((m) => m.digest === undefined || m.digest === "") ||
@@ -183,6 +200,7 @@ export function useSelectedModel(currentChatId?: string, searchQuery?: string) {
     inferenceComputes.length,
     models.length,
     settings.selectedModel,
+    settings.cpuFallbackEnabled,
     cloudDisabled,
   ]);
 

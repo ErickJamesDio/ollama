@@ -70,11 +70,23 @@ type LlamaServer interface {
 	Close() error
 	MemorySize() (total, vram uint64)
 	VRAMByGPU(id ml.DeviceID) uint64
+	PlacementInfo() PlacementInfo
 	Pid() int
 	GetPort() int
 	GetDeviceInfos(ctx context.Context) []ml.DeviceInfo
 	HasExited() bool
 	ContextLength() int
+}
+
+type PlacementDevice struct {
+	Name string
+	VRAM uint64
+}
+
+type PlacementInfo struct {
+	GPULayers   uint64
+	TotalLayers uint64
+	Devices     []PlacementDevice
 }
 
 type LlamaServerConfig struct {

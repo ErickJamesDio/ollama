@@ -9,8 +9,8 @@ export function useModelCapabilities(modelName: string | undefined) {
       return getModelCapabilities(modelName!);
     },
     enabled: !!modelName, // Only run query if modelName is provided
-    gcTime: 60 * 60 * 1000, // Keep in cache for 1 hour
-    staleTime: 60 * 60 * 1000, // Consider data stale after 1 hour
+    gcTime: 5 * 60 * 1000,
+    staleTime: 0,
     retry: 3,
     retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 5000),
   });

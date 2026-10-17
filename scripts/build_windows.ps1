@@ -613,6 +613,10 @@ function cudaCommon {
         $preset = "llama_cuda_v$($cudaMajorVer)_windows"
         $cudaToolsetArgs = cudaCMakeArgs $cuda
         $configureArgs = @("-S", "llama\server", "--preset", $preset) + $cudaToolsetArgs + @("--install-prefix", "$script:DIST_DIR")
+		if ($env:OLLAMA_CUDA_ARCHITECTURES) {
+			Write-Output "Overriding Windows CUDA architectures: $env:OLLAMA_CUDA_ARCHITECTURES"
+			$configureArgs += "-DCMAKE_CUDA_ARCHITECTURES=$env:OLLAMA_CUDA_ARCHITECTURES"
+		}
         & cmake @configureArgs
         if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
         & cmake --build "build\llama-server-cuda_v$cudaMajorVer" --config Release --parallel $script:JOBS

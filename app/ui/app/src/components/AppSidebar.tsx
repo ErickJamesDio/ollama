@@ -2,12 +2,13 @@ import { Link } from "@/components/ui/link";
 import { ChatIcon } from "@/components/ChatIcon";
 import { useSettings } from "@/hooks/useSettings";
 import {
+  CpuChipIcon,
   Cog6ToothIcon,
   PuzzlePieceIcon,
   RectangleGroupIcon,
 } from "@heroicons/react/24/outline";
 
-type AppSection = "apps" | "chat" | "plugins" | "settings";
+type AppSection = "apps" | "chat" | "inference" | "plugins" | "settings";
 
 export function AppNavigation({ current }: { current: AppSection }) {
   const { settings } = useSettings();
@@ -38,6 +39,17 @@ export function AppNavigation({ current }: { current: AppSection }) {
         <Link to="/plugins" className={itemClass("plugins")} draggable={false}>
           <PuzzlePieceIcon className="h-5 w-5 stroke-current" />
           <span className="truncate">Plugins</span>
+        </Link>
+      )}
+
+      {settings.inferenceEnabled && (
+        <Link
+          to="/inference"
+          className={itemClass("inference")}
+          draggable={false}
+        >
+          <CpuChipIcon className="h-5 w-5 stroke-current" />
+          <span className="truncate">Inference</span>
         </Link>
       )}
 

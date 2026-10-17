@@ -22,7 +22,15 @@ type ChatsResponse struct {
 }
 
 type ChatResponse struct {
-	Chat store.Chat `json:"chat"`
+	Chat              store.Chat             `json:"chat"`
+	ContextCheckpoint *ContextCheckpointInfo `json:"contextCheckpoint,omitempty"`
+}
+
+type ContextCheckpointInfo struct {
+	CoveredMessageCount   int       `json:"covered_message_count"`
+	EstimatedTokensBefore int       `json:"estimated_tokens_before"`
+	EstimatedTokensAfter  int       `json:"estimated_tokens_after"`
+	CreatedAt             time.Time `json:"created_at" ts_type:"Date" ts_transform:"new Date(__VALUE__)"`
 }
 
 type Model struct {
@@ -36,12 +44,13 @@ type ModelsResponse struct {
 }
 
 type InferenceCompute struct {
-	Library string `json:"library"`
-	Variant string `json:"variant"`
-	Compute string `json:"compute"`
-	Driver  string `json:"driver"`
-	Name    string `json:"name"`
-	VRAM    string `json:"vram"`
+	Library     string `json:"library"`
+	Variant     string `json:"variant"`
+	Compute     string `json:"compute"`
+	Driver      string `json:"driver"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	VRAM        string `json:"vram"`
 }
 
 type InferenceComputeResponse struct {
@@ -55,7 +64,7 @@ type ModelCapabilitiesResponse struct {
 
 // ChatEvent is for regular chat messages and assistant interactions
 type ChatEvent struct {
-	EventName string `json:"eventName" ts_type:"\"chat\" | \"thinking\" | \"assistant_with_tools\" | \"tool_call\" | \"tool\" | \"tool_result\" | \"done\" | \"chat_created\""`
+	EventName string `json:"eventName" ts_type:"\"chat\" | \"thinking\" | \"assistant_with_tools\" | \"tool_call\" | \"tool\" | \"tool_result\" | \"context_compaction\" | \"done\" | \"chat_created\""`
 
 	// Chat/Assistant message fields
 	Content           *string    `json:"content,omitempty"`
@@ -118,14 +127,16 @@ type Attachment struct {
 }
 
 type ChatRequest struct {
-	Model       string       `json:"model"`
-	Prompt      string       `json:"prompt"`
-	Index       *int         `json:"index,omitempty"`
-	Attachments []Attachment `json:"attachments,omitempty"`
-	WebSearch   *bool        `json:"web_search,omitempty"`
-	FileTools   *bool        `json:"file_tools,omitempty"`
-	ForceUpdate bool         `json:"forceUpdate,omitempty"`
-	Think       any          `json:"think,omitempty"`
+	Model                    string       `json:"model"`
+	Prompt                   string       `json:"prompt"`
+	Index                    *int         `json:"index,omitempty"`
+	Attachments              []Attachment `json:"attachments,omitempty"`
+	WebSearch                *bool        `json:"web_search,omitempty"`
+	FileTools                *bool        `json:"file_tools,omitempty"`
+	ForceUpdate              bool         `json:"forceUpdate,omitempty"`
+	Think                    any          `json:"think,omitempty"`
+	TraceID                  string       `json:"trace_id,omitempty"`
+	UXEstimatedContextTokens int          `json:"ux_estimated_context_tokens,omitempty"`
 }
 
 type Error struct {

@@ -78,6 +78,18 @@ func TestServerCmd(t *testing.T) {
 			dont:     []string{"OLLAMA_MODELS="},
 		},
 		{
+			name:     "inference_runtime_auto",
+			settings: store.Settings{InferenceRuntime: "auto"},
+			want:     []string{"OLLAMA_MODELS=" + defaultModels},
+			dont:     []string{"OLLAMA_LLM_LIBRARY="},
+		},
+		{
+			name:     "inference_runtime_cuda_legacy",
+			settings: store.Settings{InferenceRuntime: "cuda_legacy"},
+			want:     []string{"OLLAMA_MODELS=" + defaultModels, "OLLAMA_LLM_LIBRARY=cuda_legacy"},
+			dont:     []string{},
+		},
+		{
 			name: "all",
 			settings: store.Settings{
 				Expose:  true,

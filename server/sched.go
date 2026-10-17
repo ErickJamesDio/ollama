@@ -980,6 +980,16 @@ func selectLlamaServerPlacement(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, 
 		return gpus, launchOpts
 	}
 
+	if strings.TrimSpace(opts.TensorSplit) != "" {
+		selected := bestGPUGroupByAvailableMemory(systemInfo, groups)
+		launchOpts.MainGPU = nil
+		slog.Info("selecting GPU group for explicit tensor split",
+			"tensor_split", opts.TensorSplit,
+			"gpu_count", len(selected))
+		logSelectedGPUGroup(gpus, selected)
+		return selected, launchOpts
+	}
+
 	if opts.MainGPU != nil {
 		gpu, available, ok := bestExplicitMainGPU(systemInfo, groups, *opts.MainGPU)
 		if !ok {
@@ -1738,6 +1748,7 @@ type loadedModel struct {
 	sizeVRAM      int64
 	contextLength int
 	expiresAt     time.Time
+	placement     llm.PlacementInfo
 }
 
 // loadedModels returns a snapshot of the currently loaded models for status
@@ -1771,6 +1782,7 @@ func (s *Scheduler) loadedModels() []loadedModel {
 			total, vram := r.llama.MemorySize()
 			lm.size = int64(total)
 			lm.sizeVRAM = int64(vram)
+			lm.placement = r.llama.PlacementInfo()
 		}
 		// The scheduler waits to set expiresAt, so a model that is still
 		// loading may have the zero value. Estimate expiration from the

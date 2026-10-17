@@ -271,6 +271,39 @@ func TestChatModeForModel(t *testing.T) {
 	}
 }
 
+func TestModelForMultimodalChatCompletion(t *testing.T) {
+	base := &Model{
+		Config:          model.ConfigV2{ModelFamily: "qwen35"},
+		HasChatTemplate: true,
+		ProjectorPaths:  []string{"mmproj.gguf"},
+	}
+
+	textOnly, ok := modelForMultimodalChatCompletion(base, []api.Message{{Role: "user", Content: "hello"}})
+	if ok {
+		t.Fatal("text-only chat should not be rerouted through completion renderer")
+	}
+	if textOnly != base {
+		t.Fatal("text-only chat should keep original model pointer")
+	}
+
+	withImage, ok := modelForMultimodalChatCompletion(base, []api.Message{{Role: "user", Content: "describe", Images: []api.ImageData{[]byte("image")}}})
+	if !ok {
+		t.Fatal("qwen3.5 projector chat with image should be rerouted through completion renderer")
+	}
+	if withImage == base {
+		t.Fatal("rerouted model should be a request-local clone")
+	}
+	if withImage.Config.Renderer != "qwen3.5" {
+		t.Fatalf("renderer = %q, want qwen3.5", withImage.Config.Renderer)
+	}
+	if withImage.Config.Parser != "qwen3.5" {
+		t.Fatalf("parser = %q, want qwen3.5", withImage.Config.Parser)
+	}
+	if base.Config.Renderer != "" || base.Config.Parser != "" {
+		t.Fatalf("original model was mutated: renderer=%q parser=%q", base.Config.Renderer, base.Config.Parser)
+	}
+}
+
 func TestChatHandlerChatTemplateRoute(t *testing.T) {
 	t.Setenv("OLLAMA_CONTEXT_LENGTH", "4096")
 	t.Setenv("OLLAMA_GO_TEMPLATE", "")

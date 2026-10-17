@@ -492,6 +492,11 @@ func (c *Client) VRAMByGPU(id ml.DeviceID) uint64 {
 	return c.currentMemory()
 }
 
+// PlacementInfo implements llm.LlamaServer.
+func (c *Client) PlacementInfo() llm.PlacementInfo {
+	return llm.PlacementInfo{}
+}
+
 var _ llm.LlamaServer = (*Client)(nil)
 
 // setEnv sets or replaces an environment variable in cmd.Env.

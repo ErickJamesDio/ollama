@@ -1364,6 +1364,17 @@ func (s *Server) ShowHandler(c *gin.Context) {
 		var statusErr api.StatusError
 		switch {
 		case os.IsNotExist(err):
+			if s.modelCaches != nil && s.modelCaches.modelList != nil {
+				if summary, ok := s.modelCaches.modelList.Get(name); ok {
+					c.JSON(http.StatusOK, &api.ShowResponse{
+						Details:      summary.Details,
+						Capabilities: summary.Capabilities,
+						ModifiedAt:   summary.ModifiedAt,
+						ModelInfo:    map[string]any{},
+					})
+					return
+				}
+			}
 			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
 		case errors.As(err, &statusErr):
 			c.JSON(statusErr.StatusCode, gin.H{"error": statusErr.ErrorMessage})
@@ -2281,6 +2292,13 @@ func (s *Server) PsHandler(c *gin.Context) {
 			ParameterSize:     m.Config.ModelType,
 			QuantizationLevel: m.Config.FileType,
 		}
+		placement := make([]api.GPUPlacement, 0, len(v.placement.Devices))
+		for _, device := range v.placement.Devices {
+			placement = append(placement, api.GPUPlacement{
+				Name: device.Name,
+				VRAM: int64(device.VRAM),
+			})
+		}
 
 		models = append(models, api.ProcessModelResponse{
 			Model:         displayName,
@@ -2291,6 +2309,9 @@ func (s *Server) PsHandler(c *gin.Context) {
 			Details:       modelDetails,
 			ExpiresAt:     v.expiresAt,
 			ContextLength: v.contextLength,
+			GPULayers:     int(v.placement.GPULayers),
+			TotalLayers:   int(v.placement.TotalLayers),
+			Placement:     placement,
 		})
 	}
 
@@ -2347,6 +2368,83 @@ func optionsForPrompt(opts *api.Options, runner llm.LlamaServer) *api.Options {
 	return opts
 }
 
+func logChatContextRuntimeScheduled(traceID, modelName string, opts *api.Options, runner llm.LlamaServer) {
+	if traceID == "" {
+		return
+	}
+
+	numCtx := 0
+	if opts != nil {
+		numCtx = opts.NumCtx
+	}
+	runnerCtx := 0
+	if runner != nil {
+		runnerCtx = runner.ContextLength()
+	}
+	slog.Info("chat context trace: runtime scheduled",
+		"trace_id", traceID,
+		"model", modelName,
+		"num_ctx", numCtx,
+		"runner_context_length", runnerCtx,
+	)
+}
+
+func logChatContextRendered(traceID, modelName, mode, prompt string, messageCount, toolCount, mediaCount int, opts *api.Options) {
+	if traceID == "" {
+		return
+	}
+
+	numCtx := 0
+	if opts != nil {
+		numCtx = opts.NumCtx
+	}
+	slog.Info("chat context trace: prompt rendered",
+		"trace_id", traceID,
+		"model", modelName,
+		"mode", mode,
+		"num_ctx", numCtx,
+		"messages", messageCount,
+		"tools", toolCount,
+		"media", mediaCount,
+		"prompt_bytes", len(prompt),
+	)
+}
+
+func logChatContextNativePrepared(traceID, modelName string, req llm.ChatRequest, opts *api.Options) {
+	if traceID == "" {
+		return
+	}
+
+	numCtx := 0
+	if opts != nil {
+		numCtx = opts.NumCtx
+	}
+	slog.Info("chat context trace: native request prepared",
+		"trace_id", traceID,
+		"model", modelName,
+		"mode", "native_chat",
+		"num_ctx", numCtx,
+		"messages", len(req.Messages),
+		"tools", len(req.Tools),
+		"images", countChatImages(req.Messages),
+	)
+}
+
+func logChatContextRuntimeDone(traceID, modelName, mode string, promptEvalCount, evalCount int, finishReason string) {
+	if traceID == "" {
+		return
+	}
+
+	slog.Info("chat context trace: runtime done",
+		"trace_id", traceID,
+		"model", modelName,
+		"mode", mode,
+		"prompt_eval_count", promptEvalCount,
+		"eval_count", evalCount,
+		"finish_reason", finishReason,
+	)
+}
+
 type chatExecutionMode int
 
 const (
@@ -2360,6 +2458,38 @@ func chatModeForModel(m *Model) chatExecutionMode {
 	}
 
 	return chatExecutionModeNative
+}
+
+func hasChatImages(msgs []api.Message) bool {
+	for _, msg := range msgs {
+		if len(msg.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func modelForMultimodalChatCompletion(m *Model, msgs []api.Message) (*Model, bool) {
+	if m == nil || len(m.ProjectorPaths) == 0 || !hasChatImages(msgs) {
+		return m, false
+	}
+	if chatModeForModel(m) != chatExecutionModeNative {
+		return m, false
+	}
+
+	switch m.Config.ModelFamily {
+	case "qwen35", "qwen35moe":
+		rendered := *m
+		if rendered.Config.Renderer == "" {
+			rendered.Config.Renderer = "qwen3.5"
+		}
+		if rendered.Config.Parser == "" {
+			rendered.Config.Parser = "qwen3.5"
+		}
+		return &rendered, true
+	default:
+		return m, false
+	}
 }
 
 func llamaServerConfigForModel(m *Model) llm.LlamaServerConfig {
@@ -2641,6 +2771,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 	}
 
 	checkpointLoaded := time.Now()
+	logChatContextRuntimeScheduled(req.TraceID, req.Model, opts, r)
 
 	if len(req.Messages) == 0 {
 		c.JSON(http.StatusOK, api.ChatResponse{
@@ -2669,6 +2800,11 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		if m.Config.Parser == "" {
 			m.Config.Parser = "harmony"
 		}
+	}
+
+	if renderedModel, ok := modelForMultimodalChatCompletion(m, msgs); ok {
+		slog.Info("routing multimodal chat through completion renderer", "model", m.Name, "renderer", renderedModel.Config.Renderer, "parser", renderedModel.Config.Parser, "projector_count", len(renderedModel.ProjectorPaths))
+		m = renderedModel
 	}
 
 	if chatModeForModel(m) == chatExecutionModeNative {
@@ -2703,6 +2839,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	logChatContextRendered(req.TraceID, req.Model, "completion", prompt, len(msgs), len(processedTools), len(media), promptOpts)
 
 	// If debug mode is enabled, return the rendered template instead of calling the model
 	if req.DebugRenderOnly {
@@ -2802,6 +2939,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 					res.DoneReason = r.DoneReason.String()
 					res.TotalDuration = time.Since(checkpointStart)
 					res.LoadDuration = checkpointLoaded.Sub(checkpointStart)
+					logChatContextRuntimeDone(req.TraceID, req.Model, "completion", res.PromptEvalCount, res.EvalCount, res.DoneReason)
 				}
 
 				if builtinParser != nil {
@@ -2923,6 +3061,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 					ch <- gin.H{"error": err.Error()}
 					return
 				}
+				logChatContextRendered(req.TraceID, req.Model, "completion_structured_retry", prompt, len(msgs), len(processedTools), len(media), promptOpts)
 				// force constraining by terminating thinking header, the parser is already at this state
 				// when the last message is thinking, the rendered for gpt-oss cannot disambiguate between having the
 				// model continue thinking or ending thinking and outputting the final message.
@@ -2948,6 +3087,7 @@ func prepareNativeChatRequest(ctx context.Context, m *Model, r llm.LlamaServer, 
 
 func (s *Server) handleNativeChat(c *gin.Context, req api.ChatRequest, m *Model, r llm.LlamaServer, opts *api.Options, msgs []api.Message, checkpointStart, checkpointLoaded time.Time) {
 	truncate := req.Truncate == nil || *req.Truncate
+	promptOpts := optionsForPrompt(opts, r)
 	nativeReq, err := prepareNativeChatRequest(c.Request.Context(), m, r, opts, llm.ChatRequest{
 		Messages:    msgs,
 		Tools:       req.Tools,
@@ -2968,6 +3108,7 @@ func (s *Server) handleNativeChat(c *gin.Context, req api.ChatRequest, m *Model,
 		}
 		return
 	}
+	logChatContextNativePrepared(req.TraceID, req.Model, nativeReq, promptOpts)
 
 	if req.DebugRenderOnly {
 		prompt, err := r.ApplyChatTemplate(c.Request.Context(), nativeReq)
@@ -3019,6 +3160,7 @@ func (s *Server) handleNativeChat(c *gin.Context, req api.ChatRequest, m *Model,
 				res.DoneReason = r.DoneReason.String()
 				res.TotalDuration = time.Since(checkpointStart)
 				res.LoadDuration = checkpointLoaded.Sub(checkpointStart)
+				logChatContextRuntimeDone(req.TraceID, req.Model, "native_chat", res.PromptEvalCount, res.EvalCount, res.DoneReason)
 			}
 
 			ch <- res
@@ -3069,7 +3211,7 @@ func truncateNativeChatMessages(ctx context.Context, m *Model, r llm.LlamaServer
 		ctxLen := len(tokens)
 		if m != nil && m.ProjectorPaths != nil {
 			for _, msg := range renderReq.Messages {
-				ctxLen += 768 * len(msg.Images)
+				ctxLen += api.ImageTokenEstimate * len(msg.Images)
 			}
 		}
 

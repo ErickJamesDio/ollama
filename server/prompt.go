@@ -26,8 +26,8 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 	// TODO: This is only a truncation heuristic; llama-server handles the
 	// actual image/media inputs. Replace this with projector/model-aware media
 	// token accounting so image history is neither over-packed nor over-trimmed.
-	// Clip images are represented as 768 tokens, each an embedding.
-	imageNumTokens := 768
+	// Clip images are represented as visual embeddings rather than text bytes.
+	imageNumTokens := api.ImageTokenEstimate
 
 	lastMsgIdx := len(msgs) - 1
 	currMsgIdx := 0

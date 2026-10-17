@@ -9,11 +9,13 @@ import {
   useEffect,
   useLayoutEffect,
   useCallback,
+  useMemo,
 } from "react";
 import {
   useSendMessage,
   useIsStreaming,
   useCancelMessage,
+  useChat,
 } from "@/hooks/useChats";
 import { useNavigate } from "@tanstack/react-router";
 import { useSelectedModel } from "@/hooks/useSelectedModel";
@@ -30,7 +32,10 @@ import { ThinkButton } from "./ThinkButton";
 import { ErrorMessage } from "./ErrorMessage";
 import { processFiles } from "@/utils/fileValidation";
 import type { ImageData } from "@/types/webview";
-import { PlusIcon } from "@heroicons/react/24/outline";
+import { PlusIcon, WrenchScrewdriverIcon } from "@heroicons/react/24/outline";
+import { useQuery } from "@tanstack/react-query";
+import { getInferenceCompute } from "@/api";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export type ThinkingLevel = "low" | "medium" | "high";
 
@@ -60,6 +65,7 @@ interface ChatFormProps {
       webSearch?: boolean;
       fileTools?: boolean;
       think?: boolean | string;
+      uxEstimatedContextTokens?: number;
     },
   ) => void;
   autoFocus?: boolean;
@@ -98,6 +104,9 @@ function ChatForm({
     fileErrors: [],
   });
   const [isEditing, setIsEditing] = useState<boolean>(false);
+  const [isDarkTheme, setIsDarkTheme] = useState<boolean>(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
   const compositionEndTimeoutRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -113,6 +122,7 @@ function ChatForm({
   const cancelMessage = useCancelMessage();
   const isDownloading = isDownloadingModel;
   const { selectedModel } = useSelectedModel();
+  const { data: chatData } = useChat(chatId !== "new" ? chatId : "");
   const hasVisionCapability = useHasVisionCapability(selectedModel?.model);
   const { isAuthenticated, isLoading: isLoadingUser } = useUser();
   const [loginPromptFeature, setLoginPromptFeature] = useState<
@@ -143,16 +153,92 @@ function ChatForm({
   };
 
   const {
+    settingsData,
     settings: {
       webSearchEnabled,
       thinkEnabled,
       thinkLevel: settingsThinkLevel,
+      fileToolsEnabled,
     },
     setSettings,
   } = useSettings();
   const { cloudDisabled } = useCloudStatus();
+  const { data: inferenceComputeResponse } = useQuery({
+    queryKey: ["inferenceCompute"],
+    queryFn: getInferenceCompute,
+  });
 
   const supportsWebSearch = useHasToolsCapability(selectedModel?.model);
+  const contextWindow =
+    settingsData?.ContextLength ||
+    inferenceComputeResponse?.defaultContextLength ||
+    0;
+  const chatMessages = chatData?.chat?.messages ?? [];
+  const savedContextTokens = useMemo(
+    () =>
+      estimateMessagesTokens(chatMessages) +
+      estimateTokens(message.content) +
+      estimateAttachmentTokens(message.attachments),
+    [chatMessages, message.attachments, message.content],
+  );
+  const checkpoint = chatData?.contextCheckpoint;
+  const checkpointCoveredTurns =
+    checkpoint &&
+    checkpoint.covered_message_count > 0 &&
+    checkpoint.covered_message_count <= chatMessages.length
+      ? checkpoint.covered_message_count
+      : 0;
+  const recentContextTokens = useMemo(() => {
+    if (!checkpointCoveredTurns) {
+      return savedContextTokens;
+    }
+
+    return (
+      estimateMessagesTokens(chatMessages.slice(checkpointCoveredTurns)) +
+      estimateTokens(message.content) +
+      estimateAttachmentTokens(message.attachments)
+    );
+  }, [
+    chatMessages,
+    checkpointCoveredTurns,
+    message.attachments,
+    message.content,
+    savedContextTokens,
+  ]);
+  const compactThreshold =
+    contextWindow > 0 ? Math.max(1, Math.floor(contextWindow * 0.75)) : 0;
+  const visualContextLimit = checkpointCoveredTurns
+    ? compactThreshold || contextWindow
+    : contextWindow;
+  const visualContextTokens = checkpointCoveredTurns
+    ? recentContextTokens
+    : savedContextTokens;
+  const contextRatio =
+    visualContextLimit > 0
+      ? Math.min(visualContextTokens / visualContextLimit, 1)
+      : 0;
+  const contextFits =
+    contextWindow === 0 || savedContextTokens <= contextWindow;
+  const contextOverWindow = contextWindow > 0 && !contextFits;
+  const contextStrokeColor = contextFits
+    ? contextHaloColor(contextRatio, isDarkTheme)
+    : "#f59e0b";
+  const contextTrackColor = isDarkTheme
+    ? "rgba(255,255,255,0.14)"
+    : "rgba(82,82,91,0.24)";
+  const contextSeparatorColor = isDarkTheme
+    ? "rgba(39,39,42,0.95)"
+    : "rgba(229,229,229,0.96)";
+  const contextCircumference = 2 * Math.PI * 19;
+  const contextStrokeOffset =
+    contextCircumference - contextCircumference * contextRatio;
+  const contextHint = contextWindow
+    ? checkpointCoveredTurns
+      ? `${formatCompactTokens(recentContextTokens)} recent / ${formatCompactTokens(compactThreshold || contextWindow)} next compact. ${formatCompactTokens(savedContextTokens)} saved.`
+      : contextOverWindow
+        ? `${formatCompactTokens(savedContextTokens)} saved / ${formatCompactTokens(contextWindow)} active. Compactor sends checkpoint + recent turns.`
+        : `${formatCompactTokens(savedContextTokens)} / ${formatCompactTokens(contextWindow)} active context`
+    : "Context window unavailable";
   // Use per-chat thinking level instead of global
   const thinkLevel: ThinkingLevel =
     settingsThinkLevel === "none" || !settingsThinkLevel
@@ -184,6 +270,18 @@ function ChatForm({
       setSettings({ WebSearchEnabled: false });
     }
   }, [cloudDisabled, webSearchEnabled, setSettings]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const syncTheme = () => setIsDarkTheme(media.matches);
+
+    syncTheme();
+    media.addEventListener("change", syncTheme);
+
+    return () => {
+      media.removeEventListener("change", syncTheme);
+    };
+  }, []);
 
   const removeFile = (index: number) => {
     setMessage((prev) => ({
@@ -482,9 +580,7 @@ function ChatForm({
 
     // Prepare attachments for submission, excluding unsupported images
     const attachmentsToSend: FileAttachment[] = message.attachments
-      .filter(
-        (att) => hasVisionCapability || !isImageFile(att.filename),
-      )
+      .filter((att) => hasVisionCapability || !isImageFile(att.filename))
       .map((att) => ({
         filename: att.filename,
         data: att.data || new Uint8Array(0), // Empty data for existing files
@@ -503,14 +599,18 @@ function ChatForm({
         attachments: attachmentsToSend,
         index: undefined,
         webSearch: useWebSearch,
+        fileTools: fileToolsEnabled,
         think: useThink,
+        uxEstimatedContextTokens: savedContextTokens,
       });
     } else {
       sendMessageMutation({
         message: message.content,
         attachments: attachmentsToSend,
         webSearch: useWebSearch,
+        fileTools: fileToolsEnabled,
         think: useThink,
+        uxEstimatedContextTokens: savedContextTokens,
         onChatEvent: (event) => {
           if (event.eventName === "chat_created" && event.chatId) {
             navigate({
@@ -667,6 +767,7 @@ function ChatForm({
           const { validFiles, errors } = await processFiles(files, {
             selectedModel,
             hasVisionCapability,
+            maxFileSize: 25,
           });
 
           // Send processed files and errors to the same handler as FileUpload
@@ -690,6 +791,7 @@ function ChatForm({
       setFileUploadError(errorEvent);
     }
   };
+
   return (
     <div className={`pb-3 px-3 ${hasMessages ? "mt-auto" : "my-auto"}`}>
       {chatId === "new" && <Logo />}
@@ -723,7 +825,7 @@ function ChatForm({
       {/* File upload error message */}
       {fileUploadError && <ErrorMessage error={fileUploadError} />}
       <div
-      className={`relative mx-auto flex bg-neutral-200 w-full max-w-[768px] flex-col items-center rounded-3xl border border-neutral-200 pb-2 pt-4 dark:bg-neutral-800 dark:border-neutral-700 min-h-[88px] transition-opacity duration-200 ${isDisabled ? "opacity-50" : "opacity-100"}`}
+        className={`relative mx-auto flex bg-neutral-200 w-full max-w-[768px] flex-col items-center rounded-3xl border border-neutral-200 pb-2 pt-4 dark:bg-neutral-800 dark:border-neutral-700 min-h-[88px] transition-opacity duration-200 ${isDisabled ? "opacity-50" : "opacity-100"}`}
       >
         {isDisabled && (
           // overlay to block interaction
@@ -742,68 +844,70 @@ function ChatForm({
               const isUnsupportedImage =
                 !hasVisionCapability && isImageFile(attachment.filename);
               return (
-              <div
-                key={attachment.id}
-                className={`group flex items-center gap-2 py-2 px-3 rounded-lg transition-colors flex-shrink-0 ${
-                  isUnsupportedImage
-                    ? "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800"
-                    : "bg-neutral-50 dark:bg-neutral-700/50 hover:bg-neutral-100 dark:hover:bg-neutral-700"
-                }`}
-              >
-                {isImageFile(attachment.filename) ? (
-                  <ImageThumbnail
-                    image={{
-                      filename: attachment.filename,
-                      data: attachment.data || new Uint8Array(0),
-                    }}
-                    className="w-8 h-8 object-cover rounded-md flex-shrink-0"
-                  />
-                ) : (
-                  <svg
-                    className="w-4 h-4 text-neutral-400 dark:text-neutral-500 flex-shrink-0"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={1.5}
-                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                    />
-                  </svg>
-                )}
-                <div className="flex flex-col min-w-0">
-                  <span className={`text-sm max-w-36 truncate ${isUnsupportedImage ? "text-red-700 dark:text-red-300" : "text-neutral-700 dark:text-neutral-300"}`}>
-                    {attachment.filename}
-                  </span>
-                  {isUnsupportedImage && (
-                    <span className="text-xs text-red-600 dark:text-red-400 opacity-75">
-                      This model does not support images
-                    </span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => removeFile(index)}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 -mr-1 cursor-pointer"
-                  aria-label={`Remove ${attachment.filename}`}
+                <div
+                  key={attachment.id}
+                  className={`group flex items-center gap-2 py-2 px-3 rounded-lg transition-colors flex-shrink-0 ${
+                    isUnsupportedImage
+                      ? "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800"
+                      : "bg-neutral-50 dark:bg-neutral-700/50 hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                  }`}
                 >
-                  <svg
-                    className="w-4 h-4"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M6 18L18 6M6 6l12 12"
+                  {isImageFile(attachment.filename) ? (
+                    <ImageThumbnail
+                      image={{
+                        filename: attachment.filename,
+                        data: attachment.data || new Uint8Array(0),
+                      }}
+                      className="w-8 h-8 object-cover rounded-md flex-shrink-0"
                     />
-                  </svg>
-                </button>
-              </div>
+                  ) : (
+                    <svg
+                      className="w-4 h-4 text-neutral-400 dark:text-neutral-500 flex-shrink-0"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={1.5}
+                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                      />
+                    </svg>
+                  )}
+                  <div className="flex flex-col min-w-0">
+                    <span
+                      className={`text-sm max-w-36 truncate ${isUnsupportedImage ? "text-red-700 dark:text-red-300" : "text-neutral-700 dark:text-neutral-300"}`}
+                    >
+                      {attachment.filename}
+                    </span>
+                    {isUnsupportedImage && (
+                      <span className="text-xs text-red-600 dark:text-red-400 opacity-75">
+                        This model does not support images
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeFile(index)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 -mr-1 cursor-pointer"
+                    aria-label={`Remove ${attachment.filename}`}
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                </div>
               );
             })}
             {message.fileErrors.map((fileError, index) => (
@@ -879,14 +983,15 @@ function ChatForm({
             <div className="flex-1 flex justify-end items-center gap-2">
               <div className={`flex gap-2`}>
                 {/* File Upload Buttons */}
-                <button
-                  type="button"
-                  onClick={handleFilesUpload}
-                  className="flex h-9 w-9 items-center justify-center rounded-full bg-white dark:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer border border-transparent"
-                  title="Upload multiple files"
-                >
-                  <PlusIcon className="w-4.5 h-4.5 stroke-2 text-neutral-500 dark:text-neutral-400" />
-                </button>
+                <Tooltip content="Upload multiple files">
+                  <button
+                    type="button"
+                    onClick={handleFilesUpload}
+                    className="flex h-9 w-9 items-center justify-center rounded-full bg-white dark:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer border border-transparent"
+                  >
+                    <PlusIcon className="w-4.5 h-4.5 stroke-2 text-neutral-500 dark:text-neutral-400" />
+                  </button>
+                </Tooltip>
                 {/* Thinking Level Button */}
                 {modelSupportsThinkingLevels && (
                   <>
@@ -944,6 +1049,35 @@ function ChatForm({
                     setSettings({ WebSearchEnabled: enable });
                   }}
                 />
+                {supportsWebSearch && (
+                  <Tooltip
+                    content={
+                      fileToolsEnabled
+                        ? "Disable MCP tools"
+                        : "Enable MCP tools"
+                    }
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSettings({ Tools: !fileToolsEnabled })
+                      }
+                      aria-label={
+                        fileToolsEnabled
+                          ? "Disable MCP tools"
+                          : "Enable MCP tools"
+                      }
+                      aria-pressed={fileToolsEnabled}
+                      className={`select-none flex items-center justify-center rounded-full h-9 w-9 bg-white dark:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer transition-all border border-transparent ${
+                        fileToolsEnabled
+                          ? "text-[rgba(0,115,255,1)] dark:text-[rgba(70,155,255,1)]"
+                          : "text-neutral-500 dark:text-neutral-400"
+                      }`}
+                    >
+                      <WrenchScrewdriverIcon className="h-5 w-5" />
+                    </button>
+                  </Tooltip>
+                )}
               </div>
             </div>
           )}
@@ -958,41 +1092,81 @@ function ChatForm({
               isDisabled={isDisabled}
               onDropdownToggle={handleModelPickerDropdownToggle}
             />
-            <button
-              ref={submitButtonRef}
-              onClick={
-                isStreaming || isDownloading ? handleCancel : handleSubmit
-              }
-              disabled={
-                !isStreaming &&
-                !isDownloading &&
-                (!message.content.trim() ||
-                  shouldShowLoginBanner ||
-                  (cloudDisabled && selectedModel?.isCloud()) ||
-                  message.fileErrors.length > 0)
-              }
-              className={`flex items-center justify-center h-9 w-9 rounded-full disabled:cursor-default cursor-pointer bg-black text-white dark:bg-white dark:text-black disabled:opacity-10 focus:outline-none focus:ring-2 focus:ring-blue-500`}
+            <Tooltip
+              content={contextHint}
+              className="flex h-10 w-10 items-center justify-center"
+              tooltipClassName="w-72 whitespace-normal break-words text-center leading-snug"
             >
-              {isStreaming || isDownloading ? (
-                <svg
-                  className="h-3 w-3 fill-current"
-                  viewBox="0 0 15 15"
+              <svg
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 h-10 w-10 translate-y-[0.5px] -rotate-90"
+                viewBox="0 0 40 40"
+              >
+                <circle
+                  cx="20"
+                  cy="20"
+                  r="19"
                   fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path d="M0 12.3838C0 13.6055 0.738281 14.3262 1.96875 14.3262H12.3486C13.5879 14.3262 14.3174 13.6055 14.3174 12.3838V1.94238C14.3174 0.720703 13.5879 0 12.3486 0H1.96875C0.738281 0 0 0.720703 0 1.94238V12.3838Z" />
-                </svg>
-              ) : (
-                <svg
-                  className="h-3.5 w-3.5 fill-current"
-                  viewBox="0 0 14 17"
+                  stroke={contextTrackColor}
+                  strokeWidth="1.5"
+                />
+                <circle
+                  cx="20"
+                  cy="20"
+                  r="17"
                   fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path d="M0.918802 7.73542C1.19144 7.73542 1.43401 7.63188 1.60065 7.45804L3.59348 5.48929L6.7957 1.89614L10.0107 5.48929L12.0067 7.45804C12.179 7.63188 12.416 7.73542 12.6886 7.73542C13.2182 7.73542 13.6074 7.33974 13.6074 6.80466C13.6074 6.54785 13.5149 6.3174 13.3131 6.10998L7.51833 0.306385C7.32603 0.106874 7.06851 0 6.8029 0C6.5373 0 6.2782 0.106874 6.08748 0.306385L0.299881 6.10998C0.0996671 6.3174 0 6.54785 0 6.80466C0 7.33974 0.389177 7.73542 0.918802 7.73542ZM6.8029 16.6848C7.36909 16.6848 7.76073 16.2909 7.76073 15.7136V4.79494L7.65544 1.93059C7.65544 1.40993 7.31091 1.06066 6.8029 1.06066C6.29332 1.06066 5.94879 1.40993 5.94879 1.93059L5.8435 4.79494V15.7136C5.8435 16.2909 6.23672 16.6848 6.8029 16.6848Z" />
-                </svg>
-              )}
-            </button>
+                  stroke={contextSeparatorColor}
+                  strokeWidth="1.25"
+                />
+                <circle
+                  cx="20"
+                  cy="20"
+                  r="19"
+                  fill="none"
+                  stroke={contextStrokeColor}
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeDasharray={contextCircumference}
+                  strokeDashoffset={contextStrokeOffset}
+                  className="transition-all duration-200 ease-out"
+                />
+              </svg>
+              <button
+                ref={submitButtonRef}
+                onClick={
+                  isStreaming || isDownloading ? handleCancel : handleSubmit
+                }
+                disabled={
+                  !isStreaming &&
+                  !isDownloading &&
+                  (!message.content.trim() ||
+                    shouldShowLoginBanner ||
+                    (cloudDisabled && selectedModel?.isCloud()) ||
+                    message.fileErrors.length > 0)
+                }
+                className={`flex h-9 w-9 items-center justify-center rounded-full disabled:cursor-default cursor-pointer bg-black text-white dark:bg-white dark:text-black disabled:opacity-10 focus:outline-none focus:ring-2 focus:ring-blue-500`}
+              >
+                {isStreaming || isDownloading ? (
+                  <svg
+                    className="h-3 w-3 fill-current"
+                    viewBox="0 0 15 15"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path d="M0 12.3838C0 13.6055 0.738281 14.3262 1.96875 14.3262H12.3486C13.5879 14.3262 14.3174 13.6055 14.3174 12.3838V1.94238C14.3174 0.720703 13.5879 0 12.3486 0H1.96875C0.738281 0 0 0.720703 0 1.94238V12.3838Z" />
+                  </svg>
+                ) : (
+                  <svg
+                    className="h-3.5 w-3.5 fill-current"
+                    viewBox="0 0 14 17"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path d="M0.918802 7.73542C1.19144 7.73542 1.43401 7.63188 1.60065 7.45804L3.59348 5.48929L6.7957 1.89614L10.0107 5.48929L12.0067 7.45804C12.179 7.63188 12.416 7.73542 12.6886 7.73542C13.2182 7.73542 13.6074 7.33974 13.6074 6.80466C13.6074 6.54785 13.5149 6.3174 13.3131 6.10998L7.51833 0.306385C7.32603 0.106874 7.06851 0 6.8029 0C6.5373 0 6.2782 0.106874 6.08748 0.306385L0.299881 6.10998C0.0996671 6.3174 0 6.54785 0 6.80466C0 7.33974 0.389177 7.73542 0.918802 7.73542ZM6.8029 16.6848C7.36909 16.6848 7.76073 16.2909 7.76073 15.7136V4.79494L7.65544 1.93059C7.65544 1.40993 7.31091 1.06066 6.8029 1.06066C6.29332 1.06066 5.94879 1.40993 5.94879 1.93059L5.8435 4.79494V15.7136C5.8435 16.2909 6.23672 16.6848 6.8029 16.6848Z" />
+                  </svg>
+                )}
+              </button>
+            </Tooltip>
           </div>
         </div>
       </div>
@@ -1011,3 +1185,51 @@ function ChatForm({
 }
 
 export default ChatForm;
+
+function estimateMessagesTokens(messages: Message[]) {
+  return messages.reduce((total, current) => {
+    const attachments = current.attachments ?? [];
+    const toolCalls = current.tool_calls ?? [];
+    return (
+      total +
+      estimateTokens(current.content) +
+      estimateTokens(current.thinking || "") +
+      estimateTokens(current.model || "") +
+      attachments.length * 24 +
+      toolCalls.length * 48
+    );
+  }, 0);
+}
+
+function estimateAttachmentTokens(
+  attachments: Array<{ filename: string; data?: Uint8Array }>,
+) {
+  return attachments.reduce((total, attachment) => {
+    return total + estimateTokens(attachment.filename) + 24;
+  }, 0);
+}
+
+function estimateTokens(value: string) {
+  if (!value) {
+    return 0;
+  }
+
+  return Math.ceil(value.length / 4);
+}
+
+function formatCompactTokens(value: number) {
+  if (value >= 1000) {
+    const compact = value / 1000;
+    const formatted = compact >= 100 ? compact.toFixed(0) : compact.toFixed(1);
+    return `${formatted.replace(/\.0$/, "")}k`;
+  }
+  return `${value}`;
+}
+
+function contextHaloColor(ratio: number, isDarkTheme: boolean) {
+  if (ratio <= 0.75) {
+    return isDarkTheme ? "rgba(229,229,229,0.9)" : "rgba(115,115,115,0.9)";
+  }
+
+  return isDarkTheme ? "rgba(255,255,255,0.95)" : "rgba(82,82,91,0.96)";
+}

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getChats, getChat, sendMessage, type ChatEventUnion } from "../api";
-import { Chat, ErrorEvent, Model } from "@/gotypes";
+import { Chat, ChatResponse, ErrorEvent, Model } from "@/gotypes";
 import { Message } from "@/gotypes";
 import { useSelectedModel } from "./useSelectedModel";
 import { createQueryBatcher } from "./useQueryBatcher";
@@ -8,6 +8,18 @@ import { useRefetchModels } from "./useModels";
 import { useStreamingContext } from "@/contexts/StreamingContext";
 import { getModelCapabilities } from "@/api";
 import { useCloudStatus } from "./useCloudStatus";
+
+const contextCompactionMarker = "Context checkpoint:";
+
+function withoutContextCompactionMarker(messages: Message[]) {
+  return messages.filter(
+    (message) =>
+      !(
+        message.role === "system" &&
+        message.content?.startsWith(contextCompactionMarker)
+      ),
+  );
+}
 
 export const useChats = () => {
   return useQuery({
@@ -24,7 +36,7 @@ export const useChat = (chatId: string) => {
     queryKey: ["chat", chatId],
     queryFn: async () => {
       // Check if we have optimistic data and this chat is currently streaming
-      const existingData = queryClient.getQueryData<{ chat: Chat }>([
+      const existingData = queryClient.getQueryData<ChatResponse>([
         "chat",
         chatId,
       ]);
@@ -241,6 +253,7 @@ export const useSendMessage = (chatId: string) => {
       fileTools,
       forceUpdate,
       think,
+      uxEstimatedContextTokens,
       onChatEvent,
     }: {
       message: string;
@@ -250,6 +263,7 @@ export const useSendMessage = (chatId: string) => {
       fileTools?: boolean;
       forceUpdate?: boolean;
       think?: boolean | string;
+      uxEstimatedContextTokens?: number;
       onChatEvent?: (event: ChatEventUnion) => void;
     }) => {
       // For existing chats, set streaming state and add optimistic user message
@@ -326,6 +340,7 @@ export const useSendMessage = (chatId: string) => {
         fileTools,
         forceUpdate,
         think,
+        uxEstimatedContextTokens,
       );
       let currentChatId = chatId;
       let isCancelled = false;
@@ -370,7 +385,9 @@ export const useSendMessage = (chatId: string) => {
             batcher.scheduleBatch((old: { chat: Chat } | undefined) => {
               if (!old) return old;
 
-              const existingMessages = old.chat.messages || [];
+              const existingMessages = withoutContextCompactionMarker(
+                old.chat.messages || [],
+              );
               const newMessages = [...existingMessages];
 
               // Find or create the assistant message
@@ -422,7 +439,9 @@ export const useSendMessage = (chatId: string) => {
             batcher.scheduleBatch((old: { chat: Chat } | undefined) => {
               if (!old) return old;
 
-              const existingMessages = old.chat.messages || [];
+              const existingMessages = withoutContextCompactionMarker(
+                old.chat.messages || [],
+              );
               const newMessages = [...existingMessages];
 
               // Find or create the assistant message
@@ -461,6 +480,34 @@ export const useSendMessage = (chatId: string) => {
                 }),
               };
             });
+            break;
+          }
+          case "context_compaction": {
+            queryClient.setQueryData(
+              ["chat", currentChatId],
+              (old: { chat: Chat } | undefined) => {
+                if (!old) return old;
+
+                const existingMessages = withoutContextCompactionMarker(
+                  old.chat.messages || [],
+                );
+                const content = `${contextCompactionMarker} ${event.content ?? "preparing compacted context..."}`;
+
+                return {
+                  ...old,
+                  chat: new Chat({
+                    ...old.chat,
+                    messages: [
+                      ...existingMessages,
+                      new Message({
+                        role: "system",
+                        content,
+                      }),
+                    ],
+                  }),
+                };
+              },
+            );
             break;
           }
           case "tool_call": {
@@ -505,7 +552,9 @@ export const useSendMessage = (chatId: string) => {
               (old: { chat: Chat } | undefined) => {
                 if (!old) return old;
 
-                const existingMessages = old.chat.messages || [];
+                const existingMessages = withoutContextCompactionMarker(
+                  old.chat.messages || [],
+                );
                 const newMessages = [...existingMessages];
 
                 // Find the last assistant message and update it with tool calls
@@ -556,7 +605,9 @@ export const useSendMessage = (chatId: string) => {
               (old: { chat: Chat } | undefined) => {
                 if (!old) return old;
 
-                const existingMessages = old.chat.messages || [];
+                const existingMessages = withoutContextCompactionMarker(
+                  old.chat.messages || [],
+                );
                 const newMessages = [...existingMessages];
 
                 newMessages.push(

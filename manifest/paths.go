@@ -14,6 +14,16 @@ import (
 
 var ErrInvalidDigestFormat = errors.New("invalid digest format")
 
+var digestPattern = regexp.MustCompile(`^sha256[:-][0-9a-fA-F]{64}$`)
+
+// ValidateDigest reports whether digest names a content-addressed blob.
+func ValidateDigest(digest string) error {
+	if !digestPattern.MatchString(digest) {
+		return ErrInvalidDigestFormat
+	}
+	return nil
+}
+
 func Path() (string, error) {
 	path := filepath.Join(envconfig.Models(), "manifests")
 	if err := os.MkdirAll(path, 0o755); err != nil {
@@ -38,12 +48,10 @@ func PathForName(n model.Name) (string, error) {
 }
 
 func BlobsPath(digest string) (string, error) {
-	// only accept actual sha256 digests
-	pattern := "^sha256[:-][0-9a-fA-F]{64}$"
-	re := regexp.MustCompile(pattern)
-
-	if digest != "" && !re.MatchString(digest) {
-		return "", ErrInvalidDigestFormat
+	if digest != "" {
+		if err := ValidateDigest(digest); err != nil {
+			return "", err
+		}
 	}
 
 	digest = strings.ReplaceAll(digest, ":", "-")

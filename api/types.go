@@ -56,6 +56,10 @@ func (e AuthorizationError) Error() string {
 // ImageData represents the raw binary data of an image file.
 type ImageData []byte
 
+// ImageTokenEstimate is the host-side heuristic used when the runtime has not
+// yet reported the model-specific number of visual embeddings.
+const ImageTokenEstimate = 768
+
 // GenerateRequest describes a request sent by [Client.Generate]. While you
 // have to specify the Model and Prompt fields, all the other fields have
 // reasonable defaults for basic uses.
@@ -133,6 +137,12 @@ type GenerateRequest struct {
 type ChatRequest struct {
 	// Model is the model name, as in [GenerateRequest].
 	Model string `json:"model"`
+
+	// TraceID is an optional caller-provided correlation id for passive diagnostics.
+	TraceID string `json:"trace_id,omitempty"`
+
+	// UXEstimatedContextTokens is an optional UI-side context estimate for diagnostics only.
+	UXEstimatedContextTokens int `json:"ux_estimated_context_tokens,omitempty"`
 
 	// Messages is the messages of the chat - can be used to keep a chat memory.
 	Messages []Message `json:"messages"`
@@ -586,13 +596,14 @@ type Options struct {
 
 // Runner options which must be set when the model is loaded into memory
 type Runner struct {
-	NumCtx          int   `json:"num_ctx,omitempty"`
-	NumBatch        int   `json:"num_batch,omitempty"`
-	NumGPU          int   `json:"num_gpu,omitempty"`
-	MainGPU         *int  `json:"main_gpu,omitempty"`
-	UseMMap         *bool `json:"use_mmap,omitempty"`
-	NumThread       int   `json:"num_thread,omitempty"`
-	DraftNumPredict int   `json:"draft_num_predict,omitempty"`
+	NumCtx          int    `json:"num_ctx,omitempty"`
+	NumBatch        int    `json:"num_batch,omitempty"`
+	NumGPU          int    `json:"num_gpu,omitempty"`
+	MainGPU         *int   `json:"main_gpu,omitempty"`
+	TensorSplit     string `json:"tensor_split,omitempty"`
+	UseMMap         *bool  `json:"use_mmap,omitempty"`
+	NumThread       int    `json:"num_thread,omitempty"`
+	DraftNumPredict int    `json:"draft_num_predict,omitempty"`
 }
 
 // EmbedRequest is the request passed to [Client.Embed].
@@ -833,14 +844,22 @@ type ListModelResponse struct {
 
 // ProcessModelResponse is a single model description in [ProcessResponse].
 type ProcessModelResponse struct {
-	Name          string       `json:"name"`
-	Model         string       `json:"model"`
-	Size          int64        `json:"size"`
-	Digest        string       `json:"digest"`
-	Details       ModelDetails `json:"details,omitempty"`
-	ExpiresAt     time.Time    `json:"expires_at"`
-	SizeVRAM      int64        `json:"size_vram"`
-	ContextLength int          `json:"context_length"`
+	Name          string         `json:"name"`
+	Model         string         `json:"model"`
+	Size          int64          `json:"size"`
+	Digest        string         `json:"digest"`
+	Details       ModelDetails   `json:"details,omitempty"`
+	ExpiresAt     time.Time      `json:"expires_at"`
+	SizeVRAM      int64          `json:"size_vram"`
+	ContextLength int            `json:"context_length"`
+	GPULayers     int            `json:"gpu_layers,omitempty"`
+	TotalLayers   int            `json:"total_layers,omitempty"`
+	Placement     []GPUPlacement `json:"placement,omitempty"`
+}
+
+type GPUPlacement struct {
+	Name string `json:"name"`
+	VRAM int64  `json:"vram"`
 }
 
 type TokenResponse struct {
@@ -1114,8 +1133,9 @@ func DefaultOptions() Options {
 			// options set when the model is loaded
 			NumCtx:          int(envconfig.ContextLength()),
 			NumBatch:        512,
-			NumGPU:          -1, // -1 here indicates that NumGPU should be set dynamically
-			NumThread:       0,  // let the runtime decide
+			NumGPU:          int(envconfig.NumGPU()),
+			TensorSplit:     envconfig.TensorSplit(),
+			NumThread:       0, // let the runtime decide
 			DraftNumPredict: 4,
 			UseMMap:         nil,
 		},
