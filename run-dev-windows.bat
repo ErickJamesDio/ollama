@@ -11,7 +11,7 @@ goto start_dev
 
 :build_runtime
 echo Preparing the native Ollama runtime. This first build can take several minutes...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\build_local_windows.ps1" -SkipTests
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\prepare_dev_windows.ps1"
 if errorlevel 1 (
     echo.
     echo Native runtime build failed. Review the errors above.

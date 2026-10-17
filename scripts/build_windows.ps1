@@ -302,10 +302,16 @@ function checkEnv {
     }
     Write-Output "Checking version"
     if (!$env:VERSION) {
-        $data=(git describe --tags --first-parent --abbrev=7 --long --dirty --always)
-        $pattern="v(.+)"
-        if ($data -match $pattern) {
-            $script:VERSION=$matches[1]
+        $script:VERSION="0.0.0-dev"
+        $git = Get-Command -Name "git" -ErrorAction SilentlyContinue
+        if ($git) {
+            $data=(& $git.Path describe --tags --first-parent --abbrev=7 --long --dirty --always 2>$null)
+            $pattern="v(.+)"
+            if ($data -match $pattern) {
+                $script:VERSION=$matches[1]
+            }
+        } else {
+            Write-Warning "Git was not found; using a development version label"
         }
     } else {
         $script:VERSION=$env:VERSION
