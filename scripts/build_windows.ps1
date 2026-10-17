@@ -617,6 +617,10 @@ function cudaCommon {
 			Write-Output "Overriding Windows CUDA architectures: $env:OLLAMA_CUDA_ARCHITECTURES"
 			$configureArgs += "-DCMAKE_CUDA_ARCHITECTURES=$env:OLLAMA_CUDA_ARCHITECTURES"
 		}
+        if ($env:OLLAMA_CMAKE_CUDA_FLAGS) {
+            Write-Output "Using additional Windows CUDA compiler flags"
+            $configureArgs += "-DCMAKE_CUDA_FLAGS=$env:OLLAMA_CMAKE_CUDA_FLAGS"
+        }
         & cmake @configureArgs
         if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
         & cmake --build "build\llama-server-cuda_v$cudaMajorVer" --config Release --parallel $script:JOBS

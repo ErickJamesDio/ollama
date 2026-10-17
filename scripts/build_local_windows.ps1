@@ -25,6 +25,11 @@ try {
 
     $env:OLLAMA_BUILD_PARALLEL = "$Jobs"
     $env:OLLAMA_CUDA_ARCHITECTURES = $CudaArchitectures
+    if (-not $env:OLLAMA_CMAKE_CUDA_FLAGS) {
+        # CUDA 12.6 predates Visual Studio 2026's version check, but its MSVC
+        # toolchain remains compatible enough for this local portable build.
+        $env:OLLAMA_CMAKE_CUDA_FLAGS = "-allow-unsupported-compiler"
+    }
 
     Write-Host "Building Windows CPU, CUDA 12, CLI and Desktop app"
     Write-Host "CUDA architectures: $CudaArchitectures (61=Pascal, 75=Turing, 89=Ada Lovelace)"
