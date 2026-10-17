@@ -10,6 +10,13 @@ $fullBuild = Join-Path $PSScriptRoot "build_windows.ps1"
 
 Push-Location $repoRoot
 try {
+    $uiDist = Join-Path $repoRoot "app\ui\app\dist"
+    if (-not (Test-Path -LiteralPath (Join-Path $uiDist "index.html"))) {
+        New-Item -ItemType Directory -Path $uiDist -Force | Out-Null
+        "<!doctype html><title>temporary build placeholder</title>" |
+            Set-Content -LiteralPath (Join-Path $uiDist "index.html") -Encoding UTF8
+    }
+
     if (-not $SkipTests) {
         Write-Host "Running Go tests..."
         & go test ./app/ui ./app/tools ./app/store
