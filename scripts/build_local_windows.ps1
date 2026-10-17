@@ -23,13 +23,17 @@ try {
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
+    $vs2022 = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+    $vs2022DevShell = Join-Path $vs2022 "Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+    if (Test-Path -LiteralPath $vs2022DevShell) {
+        Import-Module $vs2022DevShell
+        Enter-VsDevShell -VsInstallPath $vs2022 -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64 -no_logo"
+        $env:VSINSTALLDIR = $vs2022
+        Write-Host "Using Visual Studio 2022 for CUDA 12 compatibility"
+    }
+
     $env:OLLAMA_BUILD_PARALLEL = "$Jobs"
     $env:OLLAMA_CUDA_ARCHITECTURES = $CudaArchitectures
-    if (-not $env:OLLAMA_CMAKE_CUDA_FLAGS) {
-        # CUDA 12.6 predates Visual Studio 2026's version check, but its MSVC
-        # toolchain remains compatible enough for this local portable build.
-        $env:OLLAMA_CMAKE_CUDA_FLAGS = "-allow-unsupported-compiler"
-    }
 
     Write-Host "Building Windows CPU, CUDA 12, CLI and Desktop app"
     Write-Host "CUDA architectures: $CudaArchitectures (61=Pascal, 75=Turing, 89=Ada Lovelace)"
