@@ -20,19 +20,19 @@ if exist "C:\msys64\ucrt64\bin\gcc.exe" (
 
 :gcc_ready
 
-if not exist "%RUNTIME%" goto build_runtime
-if not exist "%LLAMA_SERVER%" goto build_runtime
+if not exist "%RUNTIME%" goto runtime_missing
+if not exist "%LLAMA_SERVER%" goto runtime_missing
 goto start_dev
 
-:build_runtime
-echo Preparing the native Ollama runtime. This first build can take several minutes...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\prepare_dev_windows.ps1"
-if errorlevel 1 (
-    echo.
-    echo Native runtime build failed. Review the errors above.
-    pause
-    exit /b 1
-)
+:runtime_missing
+echo ERROR: the prebuilt DEV runtime is missing:
+echo   %RUNTIME%
+echo   %LLAMA_SERVER%
+echo.
+echo Run scripts\prepare_dev_windows.ps1 explicitly or copy a compatible
+echo dist\windows-amd64 folder into this checkout. This launcher never builds.
+pause
+exit /b 1
 
 :start_dev
 echo Starting Vite...
