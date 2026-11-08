@@ -247,11 +247,11 @@ try {
     $env:_CL_ = "/Z7"
     $env:GGML_CCACHE = "OFF"
 
-    if (-not $KeepBuild) {
-        foreach ($path in @($buildRoot, $stageRoot, $packageRoot, $zipPath)) {
-            if (Test-Path -LiteralPath $path) {
-                Remove-Item -LiteralPath $path -Recurse -Force
-            }
+    $cleanPaths = @($stageRoot, $packageRoot, $zipPath, "$zipPath.sha256")
+    if (-not $KeepBuild) { $cleanPaths += $buildRoot }
+    foreach ($path in $cleanPaths) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
         }
     }
 

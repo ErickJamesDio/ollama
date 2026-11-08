@@ -204,6 +204,15 @@ transporte: extraia esse invólucro primeiro. O ZIP interno é o pacote a extrai
 na cópia de teste do portátil e contém somente `runtimes/cuda_legacy/`.
 O artefato separado `cuda-legacy-reports-*` contém os relatórios do processo.
 
+### Verificação do runner antes da primeira compilação
+
+A execução [42444446644](https://github.com/ErickJamesDio/ollama/actions/runs/42444446644)
+passou em 8 de novembro de 2026, sem iniciar a compilação. Os relatórios baixados
+confirmaram Windows Server 2022 (`win22`, imagem `20261101.353.1`), 16 GiB de RAM,
+mais de 140 GiB livres em `D:`, MSVC `19.44.35229.0`, Visual Studio 2022, CMake,
+Ninja e CUDA 12.6.3 com os alvos `61;75`. O repositório aceitou o workflow e o
+upload do artefato de pré-requisitos. Não foi detectada GPU NVIDIA no runner.
+
 As duas GPUs foram detectadas pelo `-CheckOnly`, portanto o teste físico deve
 validar Turing e Pascal. A compilação, por si só, não prova que ambos os
 dispositivos carregam o mesmo backend corretamente.
