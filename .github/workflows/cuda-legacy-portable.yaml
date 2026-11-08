@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Check runner resources and native source identity
@@ -50,6 +50,8 @@ jobs:
           if ((Get-PSDrive D).Free -lt 8GB) { throw 'At least 8 GiB free on D: is required before installation.' }
           $memory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
           if ($memory -lt 7GB) { throw 'At least 7 GiB RAM is required.' }
+          & git fetch --no-tags --depth 1 origin $env:PORTABLE_SOURCE_REF
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the exact portable source reference.' }
           $nativePaths = @('LLAMA_CPP_VERSION', 'CMakeLists.txt', 'CMakePresets.json', 'cmake', 'llama/server', 'llama/compat')
           & git diff --exit-code $env:PORTABLE_SOURCE_REF HEAD -- @nativePaths
           if ($LASTEXITCODE -ne 0) { throw 'Native sources differ from the portable handoff.' }
