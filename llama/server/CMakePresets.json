@@ -85,6 +85,18 @@
       "binaryDir": "${sourceDir}/../../build/llama-server-cuda_v12"
     },
     {
+      "name": "llama_cuda_legacy_windows",
+      "inherits": ["default"],
+      "binaryDir": "${sourceDir}/../../build/llama-server-cuda_legacy",
+      "cacheVariables": {
+        "GGML_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "61;75",
+        "CMAKE_CUDA_FLAGS": "-Wno-deprecated-gpu-targets -t 2",
+        "OLLAMA_RUNNER_DIR": "cuda_legacy",
+        "OLLAMA_GPU_BACKEND": "cuda"
+      }
+    },
+    {
       "name": "llama_cuda_v13_base",
       "hidden": true,
       "inherits": ["default"],
@@ -266,6 +278,11 @@
     {
       "name": "llama_cuda_v12_user_arch",
       "configurePreset": "llama_cuda_v12_user_arch",
+      "targets": ["ggml-cuda"]
+    },
+    {
+      "name": "llama_cuda_legacy_windows",
+      "configurePreset": "llama_cuda_legacy_windows",
       "targets": ["ggml-cuda"]
     },
     {
