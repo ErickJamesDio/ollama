@@ -5,6 +5,7 @@ param(
     [string]$CudaArchitectures = "61;75",
     [ValidateRange(1, 32)]
     [int]$Jobs = 4,
+    [string]$ExpectedLlamaCommit = "",
     [switch]$CheckOnly,
     [switch]$KeepBuild
 )
@@ -40,7 +41,7 @@ function Find-VisualStudio {
     if ($programFilesX86) {
         $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
         if (Test-Path -LiteralPath $vswhere) {
-            $install = & $vswhere -latest -products * `
+            $install = & $vswhere -latest -version '[17.0,18.0)' -products * `
                 -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
                 -property installationPath 2>$null | Select-Object -First 1
             if ($install) {
@@ -156,8 +157,11 @@ function Get-NvidiaState {
     return @($rows)
 }
 
+if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
+    throw 'This build requires Windows x64 and PowerShell 7.'
+}
 if ($CudaArchitectures -ne "61;75") {
-    Write-Warning "The portable CUDA Legacy contract is sm_61 + sm_75. Requested: $CudaArchitectures"
+    throw "The portable CUDA Legacy contract requires exactly sm_61 + sm_75. Requested: $CudaArchitectures"
 }
 if (-not (Test-Path -LiteralPath $sourceRoot)) {
     throw "llama/server source was not found: $sourceRoot"
@@ -184,6 +188,11 @@ if (-not $script:vsInstall) {
     throw "Visual Studio 2022 with Desktop development with C++ was not found."
 }
 Enter-VisualStudioShell $script:vsInstall
+foreach ($tool in @('git.exe', 'dumpbin.exe')) {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Required tool not found: $tool" }
+}
+$compilerVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Get-Command cl.exe).Source).FileVersion
+Write-Host "MSVC compiler:       $compilerVersion"
 
 $ninja = Find-Ninja
 if (-not $ninja) {
@@ -248,12 +257,28 @@ try {
 
     New-Item -ItemType Directory -Path $buildRoot, $stageRoot, $packageRoot -Force | Out-Null
 
+    # Fetch only the pinned source, rather than every upstream tag. CMake applies
+    # this checkout's compatibility patches to this generated dependency tree.
+    $llamaSource = Join-Path $buildRoot 'llama-source'
+    if (-not (Test-Path -LiteralPath (Join-Path $llamaSource '.git'))) {
+        & git.exe clone --depth 1 --single-branch --branch $llamaVersion https://github.com/ggml-org/llama.cpp.git $llamaSource
+        if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the pinned llama.cpp source.' }
+    }
+    $llamaCommit = (& git.exe -C $llamaSource rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the llama.cpp commit.' }
+    if ($ExpectedLlamaCommit -and $llamaCommit -ne $ExpectedLlamaCommit) {
+        throw "llama.cpp identity mismatch: expected $ExpectedLlamaCommit, found $llamaCommit"
+    }
+    $tagCommit = (& git.exe -C $llamaSource rev-parse "$llamaVersion^{commit}").Trim()
+    if ($LASTEXITCODE -ne 0 -or $llamaCommit -ne $tagCommit) { throw 'The cached llama.cpp source does not match LLAMA_CPP_VERSION.' }
+
     $configureArgs = @(
         "-S", $sourceRoot,
         "-B", $buildRoot,
         "-G", "Ninja",
         "-DCMAKE_BUILD_TYPE=Release",
         "-DCMAKE_INSTALL_PREFIX=$stageRoot",
+        "-DFETCHCONTENT_SOURCE_DIR_LLAMA_CPP=$llamaSource",
         "-DCMAKE_CUDA_COMPILER=$($cuda.Nvcc)",
         "-DCUDAToolkit_ROOT=$($cuda.Root)",
         "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures",
@@ -293,6 +318,7 @@ try {
     }
 
     $cudaObjects = (& $cuda.Cuobjdump --list-elf $backendDll 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw 'cuobjdump could not inspect the produced backend.' }
     foreach ($architecture in ($CudaArchitectures -split ';')) {
         if ($cudaObjects -notmatch "sm_$architecture") {
             throw "cuobjdump did not find sm_$architecture in ggml-cuda.dll."
@@ -306,6 +332,47 @@ try {
     foreach ($requiredPattern in @("ggml-cuda*.dll", "cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll")) {
         if (-not ($runtimeFiles | Where-Object { $_.Name -like $requiredPattern })) {
             throw "The package is missing required CUDA runtime file pattern: $requiredPattern"
+        }
+    }
+
+    # Inspect the PE headers without executing GPU code on the CPU-only runner.
+    foreach ($dll in $runtimeFiles | Where-Object Extension -eq '.dll') {
+        $stream = [IO.File]::OpenRead($dll.FullName)
+        $reader = [IO.BinaryReader]::new($stream)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) { throw "Invalid DOS header: $($dll.Name)" }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) {
+                throw "Expected a Windows x64 DLL: $($dll.Name)"
+            }
+        } finally { $reader.Dispose() }
+    }
+    if ($runtimeFiles | Where-Object { $_.Extension -ne '.dll' -or $_.Name -match '^(ggml-base|ggml|llama)\.dll$' }) {
+        throw 'The staged runtime contains files outside the additional backend and its DLL dependencies.'
+    }
+    $exports = (& dumpbin.exe /exports (Join-Path $packageRuntime 'ggml-cuda.dll') 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $exports -notmatch '\bggml_backend_init\b') {
+        throw 'The produced DLL does not export the GGML backend entry point.'
+    }
+    $dependencyReport = foreach ($dll in $runtimeFiles) {
+        "=== $($dll.Name) ==="
+        $imports = & dumpbin.exe /dependents $dll.FullName
+        if ($LASTEXITCODE -ne 0) { throw "Could not inspect imports: $($dll.Name)" }
+        $imports
+        foreach ($line in $imports) {
+            if ($line -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') {
+                $name = $Matches[1]
+                if ($name -in $runtimeFiles.Name) { continue }
+                # The portable already supplies GGML base libraries; the NVIDIA
+                # display driver supplies nvcuda.dll. Never bundle either here.
+                if ($name -in @('ggml-base.dll', 'ggml.dll', 'nvcuda.dll')) { continue }
+                if ($name -match '^(api-ms-win-|ext-ms-win-)') { continue }
+                if ($name -notmatch '^(msvcp|vcruntime|concrt)' -and
+                    (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32\$name"))) { continue }
+                throw "Missing packaged DLL dependency: $($dll.Name) -> $name"
+            }
         }
     }
 
@@ -323,6 +390,7 @@ try {
         "",
         "Ollama source: $gitCommit",
         "llama.cpp version: $llamaVersion",
+        "llama.cpp commit: $llamaCommit",
         "CUDA architectures: $CudaArchitectures",
         "CUDA toolkit: $($cuda.Root)",
         "",
@@ -334,12 +402,35 @@ try {
         "It adds runtimes\cuda_legacy only.",
         "Do not replace runtimes\ollama-serve.exe, llama-server.exe, base GGML DLLs, Vulkan, CUDA 12, database, chats, MCP, or models."
     )
-    $buildInfo | Set-Content -LiteralPath (Join-Path $packageRoot "CUDA-LEGACY-BUILD-INFO.txt") -Encoding UTF8
+    $buildInfo | Set-Content -LiteralPath (Join-Path $packageRuntime "CUDA-LEGACY-BUILD-INFO.txt") -Encoding UTF8
+    $cudaObjects | Set-Content -LiteralPath (Join-Path $packageRuntime 'CUDA-ARCHITECTURES.txt') -Encoding UTF8
+    $dependencyReport | Set-Content -LiteralPath (Join-Path $packageRuntime 'DLL-DEPENDENCIES.txt') -Encoding UTF8
+    $redistManifest = Join-Path $cuda.Root 'CUDA-REDIST-SHA256.json'
+    if (Test-Path -LiteralPath $redistManifest) { Copy-Item -LiteralPath $redistManifest -Destination $packageRuntime }
+    $licenses = Join-Path $cuda.Root 'redistribution-licenses'
+    if (Test-Path -LiteralPath $licenses) { Copy-Item -LiteralPath $licenses -Destination (Join-Path $packageRuntime 'licenses') -Recurse }
+    Get-ChildItem -LiteralPath $packageRuntime -File -Recurse | ForEach-Object {
+        "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),
+            ([IO.Path]::GetRelativePath($packageRuntime, $_.FullName)).Replace('\', '/')
+    } | Set-Content -LiteralPath (Join-Path $packageRuntime 'SHA256SUMS.txt') -Encoding UTF8
 
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }
-    Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath $zipPath -CompressionLevel Optimal
+    Compress-Archive -Path (Join-Path $packageRoot 'runtimes') -DestinationPath $zipPath -CompressionLevel Optimal
+    $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        foreach ($entry in $zip.Entries) {
+            if ($entry.FullName.Replace('\', '/') -notmatch '^runtimes/cuda_legacy/') {
+                throw "Unexpected ZIP entry: $($entry.FullName)"
+            }
+        }
+        if (-not ($zip.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq 'runtimes/cuda_legacy/ggml-cuda.dll' })) {
+            throw 'The runtime ZIP does not contain the backend DLL.'
+        }
+    } finally { $zip.Dispose() }
+    "{0}  {1}" -f (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant(),
+        [IO.Path]::GetFileName($zipPath) | Set-Content -LiteralPath "$zipPath.sha256" -Encoding UTF8
 
     Write-Host ""
     Write-Host "CUDA Legacy portable package completed:"

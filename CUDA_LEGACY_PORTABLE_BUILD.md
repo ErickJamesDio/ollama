@@ -28,13 +28,16 @@ O pacote gerado possui esta árvore:
 
 ```text
 package\
-├── CUDA-LEGACY-BUILD-INFO.txt
 └── runtimes\
     └── cuda_legacy\
         ├── ggml-cuda.dll
         ├── cudart64_*.dll
         ├── cublas64_*.dll
         ├── cublasLt64_*.dll
+        ├── CUDA-LEGACY-BUILD-INFO.txt
+        ├── CUDA-ARCHITECTURES.txt
+        ├── DLL-DEPENDENCIES.txt
+        ├── SHA256SUMS.txt
         └── demais dependências instaladas pelo CMake
 ```
 
@@ -149,6 +152,57 @@ No computador atual, valide primeiro a RTX 2060 SUPER:
 
 A presença do runtime no seletor não prova que ele carregou. Os logs, a
 enumeração do dispositivo, `size_vram` e uma inferência real são as evidências.
+
+## Compilação no GitHub Actions
+
+O workflow `.github/workflows/cuda-legacy-portable.yaml` usa `windows-2022`
+somente na branch `codex/cuda-legacy-windows-actions`. Não cria releases, não
+altera `main` e possui apenas permissão de leitura do conteúdo do repositório.
+O primeiro push executa somente a verificação dos pré-requisitos. A compilação
+é habilitada por um push posterior com `[build-cuda-legacy]` na mensagem do
+commit e alteração em um dos arquivos cobertos pelo filtro `paths` do workflow.
+O disparo manual também aceita `build: true`, quando o GitHub disponibilizar
+`workflow_dispatch` para esse workflow; ele não é necessário para o fluxo via push.
+
+O runner precisa ter Actions habilitado e permissão para executar
+`actions/checkout` e `actions/upload-artifact`. A verificação prévia exige
+Windows x64, pelo menos 7 GiB de RAM e 8 GiB livres em `D:`, CMake, Ninja e
+Visual Studio 2022. O runner padrão não possui GPU NVIDIA: compilação e inspeção
+dos binários são possíveis, mas inferência física continua pendente nas GPUs alvo.
+
+`scripts/install_cuda_legacy_ci.ps1` prepara CUDA **12.6.3** em `D:` a partir dos
+arquivos oficiais NVIDIA, com SHA-256 fixado para cada componente. Instala apenas
+NVCC, cudart, CCCL, cuobjdump e cuBLAS; não instala driver. NVCC/CCCL são ferramentas
+de build, não entram no ZIP. Downloads, temporários, fontes nativas, build e stage
+permanecem em `D:`. São usados dois jobs de build, com dois threads internos do NVCC.
+
+A identidade nativa é conferida contra o handoff
+`f0b602e29f782180b8c3da517644b82672bba610`, `LLAMA_CPP_VERSION=b10488` e o
+commit llama.cpp `9d77fa17254e1dee4b9e92504c91611a60b1359f`.
+Nenhuma versão de biblioteca nativa é atualizada. O único alvo solicitado ao
+CMake é `ggml-cuda`, junto das dependências de link exigidas por esse alvo.
+Não são compilados o Desktop, o servidor Go ou `llama-server.exe`.
+
+Antes de publicar o artefato de teste, o script verifica:
+
+- código de máquina CUDA para `sm_61` e `sm_75` via `cuobjdump`;
+- formato PE x64 de todas as DLLs;
+- exportação `ggml_backend_init`;
+- dependências importadas, exigindo as DLLs redistribuíveis no pacote;
+- ausência de executáveis e de DLLs GGML base no runtime adicional;
+- entradas do ZIP exclusivamente sob `runtimes/cuda_legacy/`.
+
+As bibliotecas GGML base são fornecidas pelo portátil; `nvcuda.dll` é fornecida
+pelo driver NVIDIA instalado na máquina de teste. O pacote não inclui essas DLLs.
+O relatório registra importações, versões e hashes; a compatibilidade com os
+binários realmente instalados e a inferência só ficam confirmadas após o teste
+na cópia do portátil descrita acima.
+
+O artefato **ollama-portable-cuda-legacy-sm61-sm75**, retido por 14 dias, contém
+o ZIP do runtime e seu SHA-256. O GitHub entrega artefatos dentro de um ZIP de
+transporte: extraia esse invólucro primeiro. O ZIP interno é o pacote a extrair
+na cópia de teste do portátil e contém somente `runtimes/cuda_legacy/`.
+O artefato separado `cuda-legacy-reports-*` contém os relatórios do processo.
 
 As duas GPUs foram detectadas pelo `-CheckOnly`, portanto o teste físico deve
 validar Turing e Pascal. A compilação, por si só, não prova que ambos os

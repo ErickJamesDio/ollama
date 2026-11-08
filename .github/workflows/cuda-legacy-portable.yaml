@@ -1,0 +1,104 @@
+name: CUDA Legacy Portable (Windows x64)
+run-name: CUDA Legacy sm61+sm75 - ${{ github.ref_name }}
+
+on:
+  push:
+    branches: [codex/cuda-legacy-windows-actions]
+    paths:
+      - .github/workflows/cuda-legacy-portable.yaml
+      - scripts/*cuda_legacy*.ps1
+      - CUDA_LEGACY_PORTABLE_BUILD.md
+  workflow_dispatch:
+    inputs:
+      build:
+        description: Compile after the runner prerequisite check has passed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cuda-legacy-portable-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-runtime:
+    if: github.repository == 'ErickJamesDio/ollama' && github.ref == 'refs/heads/codex/cuda-legacy-windows-actions'
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      LEGACY_WORK_ROOT: D:\OllamaBuild\cuda-legacy
+      LEGACY_TOOLKIT_ROOT: D:\OllamaBuild\cuda-legacy\toolkit
+      PORTABLE_SOURCE_REF: f0b602e29f782180b8c3da517644b82672bba610
+      LLAMA_SOURCE_SHA: 9d77fa17254e1dee4b9e92504c91611a60b1359f
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check runner resources and native source identity
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
+            throw 'Expected Windows x64.'
+          }
+          if ((Get-PSDrive D).Free -lt 8GB) { throw 'At least 8 GiB free on D: is required before installation.' }
+          $memory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+          if ($memory -lt 7GB) { throw 'At least 7 GiB RAM is required.' }
+          $nativePaths = @('LLAMA_CPP_VERSION', 'CMakeLists.txt', 'CMakePresets.json', 'cmake', 'llama/server', 'llama/compat')
+          & git diff --exit-code $env:PORTABLE_SOURCE_REF HEAD -- @nativePaths
+          if ($LASTEXITCODE -ne 0) { throw 'Native sources differ from the portable handoff.' }
+          if ((Get-Content LLAMA_CPP_VERSION -Raw).Trim() -ne 'b10488') { throw 'Unexpected llama.cpp version.' }
+          & cmake --version
+          if ($LASTEXITCODE -ne 0) { throw 'CMake is unavailable.' }
+          & ninja --version
+          if ($LASTEXITCODE -ne 0) { throw 'Ninja is unavailable.' }
+          New-Item -ItemType Directory -Force -Path "$env:LEGACY_WORK_ROOT\reports", "$env:LEGACY_WORK_ROOT\temp" | Out-Null
+          "TEMP=$env:LEGACY_WORK_ROOT\temp" >> $env:GITHUB_ENV
+          "TMP=$env:LEGACY_WORK_ROOT\temp" >> $env:GITHUB_ENV
+          "Runner: $env:ImageOS $env:ImageVersion; RAM: $memory; D: free: $((Get-PSDrive D).Free)" |
+            Tee-Object -FilePath "$env:LEGACY_WORK_ROOT\reports\runner.txt"
+
+      - name: Install checksum-verified CUDA 12.6.3 without a GPU driver
+        run: ./scripts/install_cuda_legacy_ci.ps1 -ToolkitRoot $env:LEGACY_TOOLKIT_ROOT
+
+      - name: Verify the Windows compiler and Pascal/Turing targets before building
+        run: |
+          ./scripts/build_cuda_legacy_windows.ps1 -ToolkitRoot $env:LEGACY_TOOLKIT_ROOT -WorkRoot $env:LEGACY_WORK_ROOT -Jobs 2 -CheckOnly *>&1 |
+            Tee-Object -FilePath "$env:LEGACY_WORK_ROOT\reports\prerequisites.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'Prerequisite check failed.' }
+
+      # The first push only checks this repository's runner. A later, deliberate
+      # commit marker starts compilation after that run has been inspected.
+      - name: Build and validate only the additional CUDA Legacy backend
+        if: inputs.build == true || contains(github.event.head_commit.message, '[build-cuda-legacy]')
+        run: |
+          ./scripts/build_cuda_legacy_windows.ps1 -ToolkitRoot $env:LEGACY_TOOLKIT_ROOT -WorkRoot $env:LEGACY_WORK_ROOT -Jobs 2 -ExpectedLlamaCommit $env:LLAMA_SOURCE_SHA *>&1 |
+            Tee-Object -FilePath "$env:LEGACY_WORK_ROOT\reports\build.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'CUDA Legacy build failed.' }
+
+      - name: Upload the runtime ZIP for testing (no release)
+        if: success() && (inputs.build == true || contains(github.event.head_commit.message, '[build-cuda-legacy]'))
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ollama-portable-cuda-legacy-sm61-sm75
+          path: |
+            D:/OllamaBuild/cuda-legacy/ollama-portable-cuda-legacy-sm61-sm75.zip
+            D:/OllamaBuild/cuda-legacy/ollama-portable-cuda-legacy-sm61-sm75.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload prerequisite and validation reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cuda-legacy-reports-${{ github.run_attempt }}
+          path: D:/OllamaBuild/cuda-legacy/reports/
+          if-no-files-found: warn
+          retention-days: 14
